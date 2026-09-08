@@ -270,7 +270,16 @@ impl MediaHub {
     /// One stream per video group: a header naming the track and the group, then frames until
     /// the publisher finishes it at the next keyframe.
     async fn read_streams(self: Arc<Self>, conn: Connection) {
+        // Groups a peer may have open at once. Two is the seam between one group and the
+        // next; a peer opening dozens is not sending video.
+        const MAX_OPEN_GROUPS: usize = 8;
+        let open = Arc::new(AtomicU32::new(0));
         while let Ok(mut recv) = conn.accept_uni().await {
+            if open.load(Ordering::Relaxed) as usize >= MAX_OPEN_GROUPS {
+                continue;
+            }
+            open.fetch_add(1, Ordering::Relaxed);
+            let open = open.clone();
             let hub = self.clone();
             let hub_remote = move |track: u64| hub.remote_video(track);
             n0_future::task::spawn(async move {
@@ -278,6 +287,13 @@ impl MediaHub {
                 if recv.read_exact(&mut header).await.is_err() || header[0] != TAG_VIDEO {
                     return;
                 }
+                struct Open(Arc<AtomicU32>);
+                impl Drop for Open {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                let _open = Open(open);
                 let track = u64::from_le_bytes(header[1..9].try_into().expect("8 bytes"));
                 let group = u32::from_le_bytes(header[9..13].try_into().expect("4 bytes"));
                 let Some(remote) = hub_remote(track) else {

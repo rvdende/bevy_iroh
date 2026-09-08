@@ -81,11 +81,32 @@ handle once its first frame decodes, kept current; put it on a material.
 `cargo run --example conference --features media` is a room of spheres that swell when their
 owners speak, each with a screen above it.
 
+The buffering is the part that decides whether a call is usable, and it follows what
+substrate learned on real calls: a 60 ms jitter target that doubles on an underrun (after a
+one-second grace) and halves again after ten clean seconds, capped at 240 ms; an underrun is a
+whole buffer of silence rather than a splice; backlog is spent by playing up to 2% fast rather
+than kept; a lost frame is rebuilt from the next frame's in-band FEC; muted sends silence so a
+muted peer is quiet, not gone. `VoiceStats` on each remote voice carries the counters.
+
+## A camera: the `v4l2` feature
+
+With `features = ["v4l2"]` (Linux), a `bevy_v4l2` webcam is a video source in one line:
+`VideoInput::new(feed.capture.color_tap())`.
+
+## Browsers: the `wasm` feature
+
+The core transport runs in a page as it is: iroh reaches the relays over WebSockets. The
+`wasm` feature adds an identity kept in `localStorage` (`web::stored_identity`) and the ticket
+out of the address bar (`web::ticket_from_url("join")`). `scripts/web.sh` builds the cube
+example for the browser and serves it; open `http://localhost:8000/?join=<ticket>` from a
+`cargo run --example host`, a headless peer that keeps a room alive with an orbiting cube.
+Voice and video in the browser are not there yet: the codecs are C builds.
+
 ## Status
 
 Rooms, presence, replication, messages, voice and video work, each with a two-app integration
-test over real iroh (`cargo test --features media`). Planned next: a `bevy_v4l2` camera as a
-source (`v4l2`) and browser peers (`wasm`). See `PLAN.md`.
+test over real iroh (`cargo test --features media`), and a browser peer joins a native host.
+Next: browser media through WebCodecs, and substrate moving onto this crate. See `PLAN.md`.
 
 ## License
 

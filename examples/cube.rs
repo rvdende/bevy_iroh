@@ -20,12 +20,15 @@ struct Cube {
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(bevy::log::LogPlugin {
+                filter: "wgpu=error,naga=warn,bevy_iroh=debug".into(),
+                ..default()
+            }),
             IrohPlugin::default().with_display_name(whoami()),
         ))
         .replicate::<Cube>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (drive, print_ticket, announce_peers))
+        .add_systems(Update, (drive, print_ticket, announce_peers, page_title))
         .add_observer(dress_cube)
         .run();
 }
@@ -39,9 +42,15 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    match std::env::args().nth(1) {
+    // A ticket on the command line, or `?join=` in a page's address bar.
+    #[cfg(not(target_arch = "wasm32"))]
+    let ticket: Option<RoomTicket> = std::env::args()
+        .nth(1)
+        .map(|t| t.parse().expect("that is not a ticket"));
+    #[cfg(target_arch = "wasm32")]
+    let ticket: Option<RoomTicket> = bevy_iroh::web::ticket_from_url("join");
+    match ticket {
         Some(ticket) => {
-            let ticket: RoomTicket = ticket.parse().expect("that is not a ticket");
             info!("joining {}", ticket.name);
             commands.spawn(Room::join(ticket));
         }
@@ -150,3 +159,20 @@ fn announce_peers(
         info!("{} left", l.id.fmt_short());
     }
 }
+
+/// In a page there is no terminal: the tab title says what the room is doing.
+#[cfg(target_arch = "wasm32")]
+fn page_title(rooms: Query<(&Room, &RoomStatus)>, peers: Query<&Peer>) {
+    let Ok((room, status)) = rooms.single() else {
+        return;
+    };
+    let title = format!("{} {:?} peers={}", room.name, status, peers.iter().count());
+    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+        if document.title() != title {
+            document.set_title(&title);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn page_title() {}

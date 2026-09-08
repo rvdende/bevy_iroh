@@ -88,7 +88,11 @@ pub(crate) enum FromNet {
 #[derive(Resource)]
 pub struct Iroh {
     id: EndpointId,
+    #[cfg(not(target_arch = "wasm32"))]
     endpoint: Endpoint,
+    /// Filled once the endpoint has bound, which a page cannot wait for synchronously.
+    #[cfg(target_arch = "wasm32")]
+    endpoint: Arc<Mutex<Option<Endpoint>>>,
     display_name: String,
     to_net: mpsc::UnboundedSender<ToNet>,
     from_net: mpsc::UnboundedReceiver<FromNet>,
@@ -110,8 +114,19 @@ impl Iroh {
     }
 
     /// The endpoint every protocol shares. Dial peers on your own ALPN with it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn endpoint(&self) -> Endpoint {
         self.endpoint.clone()
+    }
+
+    /// The endpoint every protocol shares. `None` until it has bound, which in a page happens
+    /// a few frames after startup rather than before it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn endpoint(&self) -> Option<Endpoint> {
+        self.endpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn display_name(&self) -> &str {
@@ -402,32 +417,27 @@ fn spawn(config: Config, display_name: String) -> Result<Iroh, String> {
 #[cfg(target_arch = "wasm32")]
 fn spawn(config: Config, display_name: String) -> Result<Iroh, String> {
     // Blocking the main thread in a page blocks the event loop the endpoint needs in order to
-    // bind, so nothing here waits: the id is derivable from the key, and a bind failure
-    // arrives as `FromNet::Failed` on the first drain.
+    // bind, so nothing here waits: the id is derivable from the key, the endpoint lands in a
+    // slot when bound, and a bind failure arrives as `FromNet::Failed` on a later drain.
     let (to_net, to_net_rx) = mpsc::unbounded_channel();
     let (from_net_tx, from_net) = mpsc::unbounded_channel();
     let stop = Arc::new(AtomicBool::new(false));
     let id = config.secret_key.public();
-    let endpoint_slot = Arc::new(Mutex::new(None));
-    let slot = endpoint_slot.clone();
+    let endpoint: Arc<Mutex<Option<Endpoint>>> = Arc::new(Mutex::new(None));
+    let slot = endpoint.clone();
     let failed = from_net_tx.clone();
     n0_future::task::spawn(run(
         config,
         to_net_rx,
         from_net_tx,
         move |r| match r {
-            Ok((_, ep)) => *slot.lock().unwrap() = Some(ep),
+            Ok((_, ep)) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(ep),
             Err(why) => {
                 let _ = failed.send(FromNet::Failed { room: None, why });
             }
         },
         stop.clone(),
     ));
-    let endpoint = endpoint_slot
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or_else(|| "endpoint did not bind synchronously".to_string())?;
     Ok(Iroh {
         id,
         endpoint,

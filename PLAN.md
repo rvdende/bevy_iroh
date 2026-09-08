@@ -5,7 +5,9 @@ presence, replication with codecs, typed messages, the cube example, and the two
 0.1.0 is on crates.io. M5 voice and M6 video are built as the `media` feature: opus over QUIC
 datagrams and H.264 over one QUIC stream per group, on a `bevy_iroh/media/1` ALPN of our own
 rather than the MoQ stack, so nothing depends on iroh-live or on any git crate. The `v4l2`
-adapter and M7 browser are next.
+adapter (bevy_v4l2 0.3 colour tap) and the `wasm` feature are in; a browser peer has joined a
+native host over n0's relays. Substrate's voice buffering rules are ported into `media/audio.rs`.
+Next: browser media (WebCodecs, Web Audio), then substrate onto bevy_iroh.
 
 A Bevy plugin that makes entities shareable between peers over [iroh](https://iroh.computer):
 QUIC dialled by public key, hole punching with relay fallback, gossip for the group, direct

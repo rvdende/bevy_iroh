@@ -16,6 +16,11 @@ default = []
 ## Voice over the same endpoint: `Voice` on a shared entity publishes the microphone, remote
 ## voices play back spatially. Pulls in cpal and libopus (built from source with cmake).
 media = ["dep:cpal", "dep:opus", "dep:openh264", "dep:bytes", "dep:wgpu-types", "bevy/bevy_asset", "bevy/bevy_image"]
+## A `bevy_v4l2` webcam as a `VideoSource`: `VideoInput::new(feed.capture.color_tap())`. Linux.
+v4l2 = ["media", "dep:bevy_v4l2"]
+## What only a browser has: an identity in localStorage and the ticket from the page URL. The
+## core transport runs on wasm32 without this.
+wasm = ["dep:web-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["bevy_log", "std"] }
@@ -38,13 +43,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 cpal = { version = "0.18", optional = true }
 opus = { version = "0.4", optional = true }
 openh264 = { version = "0.9", optional = true }
+bevy_v4l2 = { version = "0.3", optional = true, default-features = false, features = ["mjpeg"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros"] }
 web-time = "1"
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 
 [package.metadata.docs.rs]
-features = ["media"]
+features = ["media", "v4l2"]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# The cube example puts the room's status in the tab title.
+web-sys = { version = "0.3", features = ["Window", "Document"] }
 
 [dev-dependencies]
 bevy = { version = "0.19", features = ["wayland", "x11"] }
@@ -65,3 +77,7 @@ required-features = ["media"]
 [[test]]
 name = "video"
 required-features = ["media"]
+
+# Until bevy_v4l2 0.3 is on crates.io. Stripped from the published manifest.
+[patch.crates-io]
+bevy_v4l2 = { path = "../bevy_v4l2" }

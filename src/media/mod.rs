@@ -7,6 +7,8 @@
 
 pub mod audio;
 pub mod transport;
+#[cfg(all(feature = "v4l2", target_os = "linux"))]
+pub mod v4l2;
 pub mod video;
 
 use std::sync::{
@@ -35,10 +37,17 @@ pub struct Voice {
     pub muted: bool,
 }
 
-/// Loudness of the last 20 ms, 0 to about 1. On local `Voice` entities from the microphone, on
-/// remote ones from what was decoded. For meters.
+/// Loudness for a meter, 0 to 1 on a decibel scale (-60 dB to 0 dB), with a 12 ms attack and
+/// a 300 ms release. On local `Voice` entities from the microphone, on remote ones from what
+/// was decoded. Loudness is not linear: a meter on raw amplitude sits at the bottom for
+/// everything anybody actually says.
 #[derive(Component, Debug, Clone, Copy, Default, Deref)]
 pub struct VoiceLevel(pub f32);
+
+/// What a remote voice has been through, updated every frame. `received` advancing between
+/// two looks is the sign of life; `starved` advancing is the network or the sender.
+#[derive(Component, Debug, Clone, Copy, Default, Deref)]
+pub struct VoiceStats(pub audio::TrackStats);
 
 /// This entity shows a picture: publish frames under its id. Replicated, so peers subscribe.
 /// Pair it locally with a [`VideoInput`] naming where the frames come from.
@@ -306,7 +315,7 @@ fn publish(
     }
 }
 
-const RESUBSCRIBE_AFTER: f64 = 2.0;
+const RESUBSCRIBE_AFTER: f64 = 0.5;
 
 fn subscribe(
     mut commands: Commands,
@@ -392,7 +401,10 @@ fn spatialize(
     listener: Query<&GlobalTransform, With<AudioListener>>,
     voices: Query<(&NetId, Option<&GlobalTransform>), (With<Voice>, With<Remote>)>,
 ) {
-    let listener = listener.iter().next().copied().unwrap_or_default();
+    // No ears is not the same as ears at the origin: leave every gain as it is.
+    let Some(listener) = listener.iter().next() else {
+        return;
+    };
     let (_, rotation, position) = listener.to_scale_rotation_translation();
     let right = rotation * Vec3::X;
     for (id, transform) in &voices {
@@ -417,9 +429,24 @@ fn spatialize(
     }
 }
 
-fn levels(media: Res<Media>, mut voices: Query<(&NetId, &mut VoiceLevel, Has<Remote>)>) {
-    for (id, mut level, remote) in &mut voices {
-        let value = if remote {
+fn levels(
+    media: Res<Media>,
+    time: Res<Time<bevy::time::Real>>,
+    mut commands: Commands,
+    mut voices: Query<(
+        Entity,
+        &NetId,
+        &mut VoiceLevel,
+        Has<Remote>,
+        Option<&mut VoiceStats>,
+    )>,
+) {
+    const FLOOR_DB: f32 = -60.0;
+    const ATTACK: f32 = 0.012;
+    const RELEASE: f32 = 0.30;
+    let dt = time.delta_secs();
+    for (entity, id, mut level, remote, stats) in &mut voices {
+        let rms = if remote {
             media.hub.remote(id.0).map(|t| t.level()).unwrap_or(0.0)
         } else {
             media
@@ -428,8 +455,26 @@ fn levels(media: Res<Media>, mut voices: Query<(&NetId, &mut VoiceLevel, Has<Rem
                 .map(|e| f32::from_bits(e.level.load(Ordering::Relaxed)))
                 .unwrap_or(0.0)
         };
+        let db = 20.0 * rms.max(1e-9).log10();
+        let target = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
+        let tau = if target > level.0 { ATTACK } else { RELEASE };
+        let alpha = 1.0 - (-dt / tau.max(1e-3)).exp();
+        let value = level.0 + (target - level.0) * alpha;
         if (level.0 - value).abs() > 1e-4 {
             level.0 = value;
+        }
+        if remote && let Some(track) = media.hub.remote(id.0) {
+            let now = track.stats();
+            match stats {
+                Some(mut s) => {
+                    if s.0 != now {
+                        s.0 = now;
+                    }
+                }
+                None => {
+                    commands.entity(entity).insert(VoiceStats(now));
+                }
+            }
         }
     }
 }

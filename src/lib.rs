@@ -18,6 +18,8 @@ pub mod net;
 pub mod node;
 pub mod replicate;
 pub mod room;
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod web;
 
 pub use iroh;
 pub use iroh_gossip::proto::TopicId;
@@ -28,7 +30,7 @@ pub mod prelude {
     #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
     pub use crate::media::{
         AudioListener, MediaSettings, TestPattern, VideoFeed, VideoImage, VideoInput, Voice,
-        VoiceLevel,
+        VoiceLevel, VoiceStats,
     };
     pub use crate::{
         Identity, Iroh, IrohPlugin, IrohSet, Relays, RoomTicket, Via,

@@ -3,12 +3,18 @@
 //! Sources and outputs are traits so the same pipeline runs against a microphone and speakers,
 //! or against a sine wave and a buffer in a test. Everything speaks mono f32 at 48 kHz inside;
 //! devices at other rates are resampled at the edges.
+//!
+//! The buffering rules are substrate's, learned on real calls: a buffer is standing latency,
+//! so it starts small and grows only when starved; an underrun is a whole buffer of silence
+//! rather than a splice; backlog is spent by playing slightly fast rather than kept; and every
+//! silent failure has a counter, because "a subscription that connects and then delivers
+//! nothing looks exactly like a person who is not talking".
 
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -20,13 +26,17 @@ use super::transport::{MediaHub, Seq};
 pub const RATE: u32 = 48_000;
 /// 20 ms at 48 kHz: opus's sweet spot for voice.
 pub const FRAME: usize = 960;
+/// The longest frame opus allows, 120 ms: a peer on another build may send them.
+const MAX_DECODED: usize = 5760;
 const MAX_PACKET: usize = 1275;
+/// Opus at 64 kbps is transparent for speech.
+const BITRATE: i32 = 64_000;
 
 /// Where microphone samples come from: mono f32 at `sample_rate`.
 pub trait AudioSource: Send + 'static {
     fn sample_rate(&self) -> u32;
     /// Fill `out` with what has arrived since the last call. Returns how many were written;
-    /// fewer than asked means wait, not end.
+    /// fewer than asked means wait, not end. May block briefly waiting for the device.
     fn read(&mut self, out: &mut [f32]) -> usize;
 }
 
@@ -43,6 +53,11 @@ pub trait AudioOutput: Send + 'static {
 // -- the encoder ---------------------------------------------------------------------------
 
 /// Reads a source, encodes 20 ms frames, and sends each to every published track.
+///
+/// Frames accumulate in one growing buffer and are cut at exactly `FRAME` samples: a device
+/// delivering 512-sample blocks and an encoder wanting 960 are never in step, and encoding a
+/// short fill padded with last time's tail is a splice in every frame. Muted sends silence
+/// rather than nothing, so a muted peer reads as quiet and not as gone.
 pub(crate) fn run_encoder(
     mut source: Box<dyn AudioSource>,
     hub: Arc<MediaHub>,
@@ -57,17 +72,19 @@ pub(crate) fn run_encoder(
             return;
         }
     };
-    let _ = encoder.set_bitrate(opus::Bitrate::Bits(32_000));
+    let _ = encoder.set_bitrate(opus::Bitrate::Bits(BITRATE));
     let _ = encoder.set_inband_fec(true);
+    let _ = encoder.set_packet_loss_perc(10);
     let mut resampler = Resampler::new(source.sample_rate(), RATE);
-    let mut raw = vec![0f32; FRAME * 2];
+    let mut raw = vec![0f32; FRAME * 4];
     let mut pcm: Vec<f32> = Vec::with_capacity(FRAME * 4);
     let mut packet = vec![0u8; MAX_PACKET];
+    let silence = vec![0f32; FRAME];
     let mut seqs: std::collections::HashMap<u64, Seq> = Default::default();
     while !stop.load(Ordering::Relaxed) {
         let n = source.read(&mut raw);
         if n == 0 {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(2));
             continue;
         }
         resampler.push(&raw[..n], &mut pcm);
@@ -81,16 +98,29 @@ pub(crate) fn run_encoder(
             let all_muted = published
                 .iter()
                 .all(|(_, muted)| muted.load(Ordering::Relaxed));
-            if all_muted {
-                continue;
-            }
-            let Ok(len) = encoder.encode_float(&frame, &mut packet) else {
-                continue;
-            };
+            let mut live: Option<usize> = None;
+            let mut quiet: Option<usize> = None;
             for (track, muted) in published {
-                if muted.load(Ordering::Relaxed) {
-                    continue;
-                }
+                let slot = if muted.load(Ordering::Relaxed) || all_muted {
+                    &mut quiet
+                } else {
+                    &mut live
+                };
+                let len = match slot {
+                    Some(len) => *len,
+                    None => {
+                        let src = if muted.load(Ordering::Relaxed) {
+                            &silence
+                        } else {
+                            &frame
+                        };
+                        let Ok(len) = encoder.encode_float(src, &mut packet) else {
+                            continue;
+                        };
+                        *slot = Some(len);
+                        len
+                    }
+                };
                 let seq = seqs.entry(track).or_default().next();
                 hub.send_audio(track, seq, &packet[..len]);
             }
@@ -157,6 +187,28 @@ impl Resampler {
 
 // -- remote tracks -------------------------------------------------------------------------
 
+/// What a remote track has been through. Rates, not totals, are what to read: a total that
+/// grew once at startup and one that grows every second look the same at a glance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TrackStats {
+    /// Frames that arrived.
+    pub received: u64,
+    /// Buffers the output asked for that had to be silence.
+    pub starved: u64,
+    /// Frames thrown away because the buffer was full.
+    pub dropped: u64,
+    /// Frames concealed by the decoder because they never came.
+    pub concealed: u64,
+    /// Times the target grew after an underrun.
+    pub regrows: u64,
+    /// Times the target shrank after clean play.
+    pub shrinks: u64,
+    /// The current jitter target, in milliseconds.
+    pub target_ms: u32,
+    /// Frames waiting to be played.
+    pub depth: u32,
+}
+
 /// Frames from one remote track, and how to play them.
 pub struct RemoteTrack {
     jitter: Mutex<Jitter>,
@@ -166,6 +218,7 @@ pub struct RemoteTrack {
     pan: AtomicU32,
     /// RMS of the last decoded frame, as f32 bits.
     level: AtomicU32,
+    received: AtomicU64,
 }
 
 impl RemoteTrack {
@@ -175,10 +228,12 @@ impl RemoteTrack {
             gain: AtomicU32::new(1.0f32.to_bits()),
             pan: AtomicU32::new(0.0f32.to_bits()),
             level: AtomicU32::new(0.0f32.to_bits()),
+            received: AtomicU64::new(0),
         }
     }
 
     pub(crate) fn push(&self, seq: u32, frame: Bytes) {
+        self.received.fetch_add(1, Ordering::Relaxed);
         self.jitter
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -195,8 +250,28 @@ impl RemoteTrack {
             .store(pan.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
+    /// RMS of the last 20 ms decoded, 0 to about 1.
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    /// Frames that have arrived, ever. Advancing between two looks is the sign of life.
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    pub fn stats(&self) -> TrackStats {
+        let j = self.jitter.lock().unwrap_or_else(|e| e.into_inner());
+        TrackStats {
+            received: self.received(),
+            starved: j.starved,
+            dropped: j.dropped,
+            concealed: j.concealed,
+            regrows: j.regrows,
+            shrinks: j.shrinks,
+            target_ms: (j.target * 20) as u32,
+            depth: j.frames.len() as u32,
+        }
     }
 
     fn gain(&self) -> f32 {
@@ -208,77 +283,149 @@ impl RemoteTrack {
     }
 }
 
-/// Reorders frames and absorbs network jitter. Holds `target` frames before starting; a gap is
-/// concealed by the decoder; a buffer that grows past `max` is skipped forward, since latency
-/// that has crept in never leaves on its own.
+/// Frames the buffer holds before it starts playing: 60 ms.
+const JITTER_START: usize = 3;
+/// The most it will grow to for a conversation: 240 ms. More is a buffer that has stopped
+/// being a conversation.
+const JITTER_MAX: usize = 12;
+/// Room above the target before frames are dropped.
+const JITTER_SLACK: usize = 12;
+/// Underruns in the first second of a track do not grow the target: subscribing, building
+/// the decoder and the first burst starve it a few times before anyone has said a word.
+const JITTER_GRACE_FRAMES: u64 = 50;
+/// Clean play, in frames, that halves the target: ten seconds.
+const JITTER_DECAY_FRAMES: u64 = 500;
+
+/// Reorders frames and absorbs network jitter.
+///
+/// Waits for `target` frames before playing, and again after every underrun. An underrun grows
+/// the target; ten seconds of clean play shrinks it back. Excess over the target is spent by
+/// the mixer playing slightly fast (see [`Jitter::drift`]); dropping is the last resort.
 #[derive(Default)]
 struct Jitter {
     frames: BTreeMap<u32, Bytes>,
     next: Option<u32>,
-    /// Frames the buffer waits to hold before playing.
+    /// Frames to bank before playing.
     target: usize,
-    received: u64,
+    /// Waiting to bank `target` frames.
+    priming: bool,
+    /// Frames played since the last underrun.
+    clean: u64,
+    /// Frames played, ever.
+    played: u64,
+    starved: u64,
+    dropped: u64,
+    concealed: u64,
+    regrows: u64,
+    shrinks: u64,
 }
-
-const JITTER_TARGET: usize = 3;
-const JITTER_MAX: usize = 12;
 
 enum Pull {
     Frame(Bytes),
-    /// Expected a frame and it is not here: conceal.
-    Lost,
-    /// Nothing to play: silence.
+    /// Expected a frame and it is not here. The one after it, if it has arrived, carries a
+    /// low-bitrate copy of it (opus in-band FEC).
+    Lost {
+        next: Option<Bytes>,
+    },
+    /// Nothing to play: silence, and prime again.
     Idle,
 }
 
 impl Jitter {
+    fn target(&mut self) -> usize {
+        if self.target == 0 {
+            self.target = JITTER_START;
+            self.priming = true;
+        }
+        self.target
+    }
+
     fn push(&mut self, seq: u32, frame: Bytes) {
-        self.received += 1;
+        let target = self.target();
         if let Some(next) = self.next
             && seq.wrapping_sub(next) > u32::MAX / 2
         {
             // Older than what we already played.
+            self.dropped += 1;
             return;
         }
         self.frames.insert(seq, frame);
+        // A peer can keep sending whether or not anything here plays; the buffer cannot grow
+        // without bound. Keep the newest.
+        while self.frames.len() > target + JITTER_SLACK {
+            let oldest = *self.frames.keys().next().expect("non-empty");
+            self.frames.remove(&oldest);
+            self.dropped += 1;
+            self.next = None;
+        }
     }
 
     fn pull(&mut self) -> Pull {
-        let target = if self.target == 0 {
-            JITTER_TARGET
-        } else {
-            self.target
-        };
-        let Some(next) = self.next else {
+        let target = self.target();
+        if self.priming {
             if self.frames.len() < target {
                 return Pull::Idle;
             }
-            let first = *self.frames.keys().next().expect("non-empty");
-            self.next = Some(first);
-            return self.pull();
-        };
-        if self.frames.len() > JITTER_MAX {
-            // Skip forward, keeping `target` frames of cushion.
-            let keep_from = *self
-                .frames
-                .keys()
-                .nth(self.frames.len() - target)
-                .expect("in range");
-            self.frames = self.frames.split_off(&keep_from);
-            self.next = Some(keep_from);
-            return self.pull();
+            self.priming = false;
         }
+        let next = match self.next {
+            Some(next) => next,
+            None => {
+                let Some(first) = self.frames.keys().next().copied() else {
+                    return self.underrun();
+                };
+                first
+            }
+        };
         if let Some(frame) = self.frames.remove(&next) {
             self.next = Some(next.wrapping_add(1));
+            self.played_one();
             return Pull::Frame(frame);
         }
         if self.frames.is_empty() {
-            // Starved: wait for a cushion again before continuing.
-            self.next = None;
-            return Pull::Idle;
+            return self.underrun();
         }
+        // A gap with later frames behind it: conceal it and move on.
         self.next = Some(next.wrapping_add(1));
-        Pull::Lost
+        self.concealed += 1;
+        self.played_one();
+        Pull::Lost {
+            next: self.frames.get(&next.wrapping_add(1)).cloned(),
+        }
+    }
+
+    fn played_one(&mut self) {
+        self.clean += 1;
+        self.played += 1;
+        if self.clean >= JITTER_DECAY_FRAMES && self.target > JITTER_START {
+            self.target = (self.target / 2).max(JITTER_START);
+            self.shrinks += 1;
+            self.clean = 0;
+        }
+    }
+
+    /// Nothing to play. Prime again, and if this is not the track's first second, take it as
+    /// a sign the network needs more cushion.
+    fn underrun(&mut self) -> Pull {
+        self.starved += 1;
+        self.clean = 0;
+        self.next = None;
+        self.priming = true;
+        if self.played >= JITTER_GRACE_FRAMES && self.target < JITTER_MAX {
+            self.target = (self.target * 2).min(JITTER_MAX);
+            self.regrows += 1;
+        }
+        Pull::Idle
+    }
+
+    /// The playback-rate bend that spends standing backlog: up to two percent faster when the
+    /// buffer holds more than the target, slower when less. A third of a semitone, which
+    /// speech carries without anyone noticing.
+    fn drift(&mut self) -> f64 {
+        const MAX_DRIFT: f64 = 0.02;
+        let target = self.target() as f64;
+        let excess = self.frames.len() as f64 - target;
+        (1.0 + (excess / target) * MAX_DRIFT).clamp(1.0 - MAX_DRIFT, 1.0 + MAX_DRIFT)
     }
 }
 
@@ -289,14 +436,15 @@ struct Playing {
     decoder: opus::Decoder,
     /// Decoded, at 48 kHz, waiting to be rendered.
     pcm: std::collections::VecDeque<f32>,
+    /// Where this buffer starts between two source samples.
+    pos: f64,
 }
 
 /// Sums every remote track into an output buffer. Owned by the output device's thread.
 pub struct Mixer {
     hub: Arc<MediaHub>,
     playing: Vec<(u64, Playing)>,
-    frame: Vec<f32>,
-    resample_pos: f64,
+    scratch: Vec<f32>,
 }
 
 impl Mixer {
@@ -304,13 +452,13 @@ impl Mixer {
         Self {
             hub,
             playing: Vec::new(),
-            frame: vec![0.0; FRAME],
-            resample_pos: 0.0,
+            scratch: vec![0.0; MAX_DECODED],
         }
     }
 
     /// Fill `out`, interleaved with `channels` channels at `rate`, with the mix of every remote
-    /// track. Silence where nothing is playing.
+    /// track. Silence where nothing is playing. A track that cannot fill the whole buffer
+    /// contributes silence for the whole buffer: one clean gap, not a splice.
     pub fn render(&mut self, out: &mut [f32], channels: usize, rate: u32) {
         out.fill(0.0);
         let channels = channels.max(1);
@@ -319,22 +467,30 @@ impl Mixer {
             return;
         }
         self.sync_tracks();
-        // Source samples are at 48 kHz; `resample_pos` is where this buffer starts between them.
-        let step = RATE as f64 / rate.max(1) as f64;
-        let end = self.resample_pos + frames_out as f64 * step;
-        let needed = end.ceil() as usize + 1;
+        let base_step = RATE as f64 / rate.max(1) as f64;
         for (_, playing) in &mut self.playing {
-            Self::top_up(playing, needed, &mut self.frame);
-            if playing.pcm.is_empty() {
+            let drift = playing
+                .track
+                .jitter
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drift();
+            let step = base_step * drift;
+            let end = playing.pos + frames_out as f64 * step;
+            let needed = end.ceil() as usize + 1;
+            Self::top_up(playing, needed, &mut self.scratch);
+            if playing.pcm.len() < needed {
+                // Whole buffer of silence; what is banked plays once there is enough.
+                playing.pos = 0.0;
                 continue;
             }
             let gain = playing.track.gain();
             let (left, right) = pan_gains(playing.track.pan());
-            let mut pos = self.resample_pos;
+            let mut pos = playing.pos;
             for f in 0..frames_out {
                 let i = pos.floor() as usize;
                 let t = (pos - i as f64) as f32;
-                let a = playing.pcm.get(i).copied().unwrap_or(0.0);
+                let a = playing.pcm[i];
                 let b = playing.pcm.get(i + 1).copied().unwrap_or(a);
                 let s = (a + (b - a) * t) * gain;
                 let base = f * channels;
@@ -346,12 +502,10 @@ impl Mixer {
                 }
                 pos += step;
             }
-        }
-        let consumed = end.floor() as usize;
-        for (_, playing) in &mut self.playing {
+            let consumed = end.floor() as usize;
             playing.pcm.drain(..consumed.min(playing.pcm.len()));
+            playing.pos = end - consumed as f64;
         }
-        self.resample_pos = end - consumed as f64;
         for s in out.iter_mut() {
             *s = s.clamp(-1.0, 1.0);
         }
@@ -372,13 +526,14 @@ impl Mixer {
                         track,
                         decoder,
                         pcm: Default::default(),
+                        pos: 0.0,
                     },
                 ));
             }
         }
     }
 
-    fn top_up(playing: &mut Playing, needed: usize, frame: &mut [f32]) {
+    fn top_up(playing: &mut Playing, needed: usize, scratch: &mut [f32]) {
         while playing.pcm.len() < needed {
             let pull = playing
                 .track
@@ -389,22 +544,31 @@ impl Mixer {
             let decoded = match pull {
                 Pull::Frame(bytes) => playing
                     .decoder
-                    .decode_float(&bytes, frame, false)
+                    .decode_float(&bytes, scratch, false)
                     .unwrap_or(0),
-                Pull::Lost => playing.decoder.decode_float(&[], frame, false).unwrap_or(0),
+                // The next frame's FEC data reconstructs this one; without it, the decoder
+                // extrapolates from what it last heard.
+                Pull::Lost { next: Some(bytes) } => playing
+                    .decoder
+                    .decode_float(&bytes, scratch, true)
+                    .unwrap_or(0),
+                Pull::Lost { next: None } => playing
+                    .decoder
+                    .decode_float(&[], scratch, false)
+                    .unwrap_or(0),
                 Pull::Idle => {
                     playing.track.level.store(0f32.to_bits(), Ordering::Relaxed);
-                    break;
+                    return;
                 }
             };
             if decoded == 0 {
-                break;
+                return;
             }
             playing
                 .track
                 .level
-                .store(rms(&frame[..decoded]).to_bits(), Ordering::Relaxed);
-            playing.pcm.extend(&frame[..decoded]);
+                .store(rms(&scratch[..decoded]).to_bits(), Ordering::Relaxed);
+            playing.pcm.extend(&scratch[..decoded]);
         }
     }
 }
@@ -417,12 +581,23 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 
 // -- cpal ----------------------------------------------------------------------------------
 
+/// Samples from the capture callback, and a way to wait for them.
+#[derive(Default)]
+struct MicBuffer {
+    samples: Mutex<std::collections::VecDeque<f32>>,
+    arrived: Condvar,
+}
+
 /// The default input device, mono, at whatever rate it prefers.
 pub struct Microphone {
     rate: u32,
-    buffer: Arc<Mutex<std::collections::VecDeque<f32>>>,
+    buffer: Arc<MicBuffer>,
     _keep: std::sync::mpsc::Sender<()>,
 }
+
+/// How much capture may bank before the reader is behind: three encoder frames. More is
+/// sender-side latency that never comes back.
+const MIC_BACKLOG_FRAMES: usize = 3;
 
 impl Microphone {
     /// Opens the default input device. The stream lives on its own thread until this is dropped.
@@ -433,8 +608,9 @@ impl Microphone {
         let config = device.default_input_config().map_err(|e| e.to_string())?;
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
-        let buffer: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        let buffer = Arc::new(MicBuffer::default());
         let sink = buffer.clone();
+        let cap = (rate as usize / 50) * MIC_BACKLOG_FRAMES;
         let (keep, gone) = std::sync::mpsc::channel::<()>();
         let (ready, started) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -443,15 +619,16 @@ impl Microphone {
                 let stream = device.build_input_stream(
                     config.config(),
                     move |data: &[f32], _| {
-                        let mut b = sink.lock().unwrap_or_else(|e| e.into_inner());
-                        for frame in data.chunks(channels) {
-                            b.push_back(frame.iter().sum::<f32>() / channels as f32);
+                        {
+                            let mut b = sink.samples.lock().unwrap_or_else(|e| e.into_inner());
+                            for frame in data.chunks(channels) {
+                                b.push_back(frame.iter().sum::<f32>() / channels as f32);
+                            }
+                            while b.len() > cap {
+                                b.pop_front();
+                            }
                         }
-                        // A reader that fell behind gets the newest half second, not a backlog.
-                        let cap = RATE as usize / 2;
-                        while b.len() > cap {
-                            b.pop_front();
-                        }
+                        sink.arrived.notify_one();
                     },
                     |e| tracing::warn!("bevy_iroh: microphone: {e}"),
                     None,
@@ -485,8 +662,21 @@ impl AudioSource for Microphone {
         self.rate
     }
 
+    /// Waits up to 20 ms for the device rather than polling.
     fn read(&mut self, out: &mut [f32]) -> usize {
-        let mut b = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut b = self
+            .buffer
+            .samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if b.is_empty() {
+            let (guard, _) = self
+                .buffer
+                .arrived
+                .wait_timeout(b, Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner());
+            b = guard;
+        }
         let n = out.len().min(b.len());
         for s in out.iter_mut().take(n) {
             *s = b.pop_front().unwrap_or(0.0);
@@ -550,6 +740,10 @@ impl AudioOutput for Speaker {
 mod tests {
     use super::*;
 
+    fn frame(n: u8) -> Bytes {
+        Bytes::from(vec![n])
+    }
+
     #[test]
     fn resampler_keeps_length_proportional() {
         let mut r = Resampler::new(44_100, 48_000);
@@ -562,30 +756,86 @@ mod tests {
     }
 
     #[test]
-    fn jitter_waits_then_plays_in_order_and_conceals_gaps() {
+    fn jitter_primes_then_plays_in_order_and_conceals_gaps() {
         let mut j = Jitter::default();
         assert!(matches!(j.pull(), Pull::Idle));
         for seq in [2u32, 0, 1] {
-            j.push(seq, Bytes::from(vec![seq as u8]));
+            j.push(seq, frame(seq as u8));
         }
         assert!(matches!(j.pull(), Pull::Frame(b) if b[0] == 0));
         assert!(matches!(j.pull(), Pull::Frame(b) if b[0] == 1));
-        j.push(4, Bytes::from(vec![4]));
+        j.push(4, frame(4));
         assert!(matches!(j.pull(), Pull::Frame(b) if b[0] == 2));
-        assert!(matches!(j.pull(), Pull::Lost));
+        // 3 is missing and 4 is here: conceal 3 with 4's FEC.
+        assert!(matches!(j.pull(), Pull::Lost { next: Some(b) } if b[0] == 4));
         assert!(matches!(j.pull(), Pull::Frame(b) if b[0] == 4));
+        assert_eq!(j.concealed, 1);
+        // Empty: an underrun, which primes again.
         assert!(matches!(j.pull(), Pull::Idle));
+        assert_eq!(j.starved, 1);
+        assert!(j.priming);
     }
 
     #[test]
-    fn jitter_skips_forward_when_latency_creeps() {
+    fn jitter_grows_on_underrun_after_grace_and_shrinks_after_clean_play() {
         let mut j = Jitter::default();
-        for seq in 0..20u32 {
-            j.push(seq, Bytes::from(vec![seq as u8]));
+        // First second: underruns do not grow the target.
+        for seq in 0..3u32 {
+            j.push(seq, frame(0));
         }
-        let Pull::Frame(b) = j.pull() else {
-            panic!("expected a frame")
-        };
-        assert!(b[0] >= 20 - JITTER_TARGET as u8, "skipped to {}", b[0]);
+        for _ in 0..3 {
+            j.pull();
+        }
+        assert!(matches!(j.pull(), Pull::Idle));
+        assert_eq!(j.target, JITTER_START);
+        // Past the grace: an underrun doubles it.
+        let mut seq = 3u32;
+        while j.played < JITTER_GRACE_FRAMES {
+            for _ in 0..3 {
+                j.push(seq, frame(0));
+                seq += 1;
+            }
+            for _ in 0..3 {
+                j.pull();
+            }
+        }
+        assert!(matches!(j.pull(), Pull::Idle));
+        assert_eq!(j.target, JITTER_START * 2);
+        assert_eq!(j.regrows, 1);
+        // Ten seconds of clean play halves it back.
+        for _ in 0..(JITTER_DECAY_FRAMES + 8) {
+            j.push(seq, frame(0));
+            seq += 1;
+            if !j.priming || j.frames.len() >= j.target {
+                j.pull();
+            }
+        }
+        assert_eq!(j.target, JITTER_START);
+        assert!(j.shrinks >= 1);
+    }
+
+    #[test]
+    fn jitter_drops_when_nobody_plays() {
+        let mut j = Jitter::default();
+        for seq in 0..100u32 {
+            j.push(seq, frame(0));
+        }
+        assert!(j.frames.len() <= JITTER_START + JITTER_SLACK);
+        assert!(j.dropped > 0);
+    }
+
+    #[test]
+    fn drift_is_bounded_and_centred() {
+        let mut j = Jitter::default();
+        for seq in 0..3u32 {
+            j.push(seq, frame(0));
+        }
+        assert!((j.drift() - 1.0).abs() < 1e-9);
+        for seq in 3..15u32 {
+            j.push(seq, frame(0));
+        }
+        assert!((j.drift() - 1.02).abs() < 1e-9);
+        j.frames.clear();
+        assert!((j.drift() - 0.98).abs() < 1e-9);
     }
 }

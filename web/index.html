@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>bevy_iroh cube</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #202428; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <script type="module">
+    // Built by `scripts/web.sh`: wasm-bindgen output of the cube example.
+    import init from "./cube.js";
+    init().catch((e) => {
+      // winit uses an exception for control flow once the event loop is running.
+      if (!String(e).includes("Using exceptions for control flow")) {
+        console.error(e);
+      }
+    });
+  </script>
+</body>
+</html>

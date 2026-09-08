@@ -54,7 +54,7 @@ pub struct VideoConfig {
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
-            bitrate_bps: 1_500_000,
+            bitrate_bps: 2_000_000,
             max_fps: 30.0,
             keyframe_interval: 60,
         }
@@ -96,6 +96,7 @@ pub(crate) fn run_encoder(
     let mut last = Instant::now() - min_gap;
     let mut group: u32 = 0;
     let mut yuv: Option<YUVBuffer> = None;
+    let mut reported = false;
     while !stop.load(Ordering::Relaxed) {
         let since = last.elapsed();
         if since < min_gap {
@@ -107,6 +108,16 @@ pub(crate) fn run_encoder(
         };
         last = Instant::now();
         let (w, h) = (frame.width as usize, frame.height as usize);
+        if !reported {
+            reported = true;
+            // Zero means the source is handing over blank frames, which is indistinguishable
+            // downstream from a working pipeline carrying a black picture.
+            let brightest = match &frame.pixels {
+                Pixels::Rgba(data) => data.iter().copied().max().unwrap_or(0),
+                Pixels::I420 { y, .. } => y.iter().copied().max().unwrap_or(0),
+            };
+            tracing::info!("bevy_iroh: encoding {w}x{h} video, brightest byte {brightest}");
+        }
         if w < 16 || h < 16 || w % 2 != 0 || h % 2 != 0 {
             tracing::warn!("bevy_iroh: video frames must be even-sized and at least 16x16");
             continue;
@@ -231,7 +242,6 @@ pub struct RgbaFrame {
 pub struct RemoteVideo {
     packets: Mutex<Option<std::sync::mpsc::Sender<VideoPacket>>>,
     latest: Mutex<Option<RgbaFrame>>,
-    stop: Arc<AtomicBool>,
     frames: std::sync::atomic::AtomicU64,
 }
 
@@ -240,7 +250,6 @@ impl RemoteVideo {
         Self {
             packets: Mutex::new(None),
             latest: Mutex::new(None),
-            stop: Arc::new(AtomicBool::new(false)),
             frames: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -285,9 +294,10 @@ impl RemoteVideo {
             }
         };
         let mut current_group: Option<u32> = None;
-        let mut rgba = Vec::new();
-        while !self.stop.load(Ordering::Relaxed) {
+        let mut spare: Vec<u8> = Vec::new();
+        loop {
             let Ok(packet) = rx.recv_timeout(Duration::from_millis(200)) else {
+                // The subscription is gone when this thread holds the last reference.
                 if Arc::strong_count(&self) == 1 {
                     return;
                 }
@@ -312,24 +322,29 @@ impl RemoteVideo {
                 }
             };
             let (w, h) = decoded.dimensions();
+            // Reuse the buffer the Bevy side handed back, rather than allocating a full
+            // picture per frame.
+            let mut rgba = std::mem::take(&mut spare);
             rgba.resize(w * h * 4, 0);
             decoded.write_rgba8(&mut rgba);
             if self.frames.fetch_add(1, Ordering::Relaxed) == 0 {
-                tracing::info!("bevy_iroh: seeing a {w}x{h} picture");
+                let brightest = rgba.iter().copied().max().unwrap_or(0);
+                tracing::info!("bevy_iroh: seeing a {w}x{h} picture, brightest byte {brightest}");
             }
-            *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(RgbaFrame {
-                width: w as u32,
-                height: h as u32,
-                data: rgba.clone(),
-                pts_ms: packet.pts_ms,
-            });
+            let previous = self
+                .latest
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace(RgbaFrame {
+                    width: w as u32,
+                    height: h as u32,
+                    data: rgba,
+                    pts_ms: packet.pts_ms,
+                });
+            if let Some(unshown) = previous {
+                spare = unshown.data;
+            }
         }
-    }
-}
-
-impl Drop for RemoteVideo {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
