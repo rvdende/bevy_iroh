@@ -1,6 +1,6 @@
 //! The wire format, and the one decision that makes it extensible.
 //!
-//! Everything on the wire is a [`Signed`] blob wrapping an [`Envelope`], and every envelope
+//! Everything on the wire is a `Signed` blob wrapping an [`Envelope`], and every envelope
 //! carries an opaque `body: Vec<u8>` tagged with a [`Kind`]. The body is *not* a nested enum,
 //! and that is deliberate.
 //!
