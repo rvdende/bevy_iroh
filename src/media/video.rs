@@ -15,7 +15,7 @@ use std::{
 use openh264::{
     decoder::Decoder,
     encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, UsageType},
-    formats::{RgbaSliceU8, YUVBuffer, YUVSlices, YUVSource},
+    formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer, YUVSlices, YUVSource},
 };
 
 use super::transport::MediaHub;
@@ -32,6 +32,8 @@ pub struct VideoFrame {
 pub enum Pixels {
     /// `width * height * 4` bytes.
     Rgba(Vec<u8>),
+    /// `width * height * 4` bytes, blue first: what most capture APIs and swapchains hand out.
+    Bgra(Vec<u8>),
     /// Planar 4:2:0: a full-size luma plane and two quarter-size chroma planes.
     I420 { y: Vec<u8>, u: Vec<u8>, v: Vec<u8> },
 }
@@ -113,7 +115,7 @@ pub(crate) fn run_encoder(
             // Zero means the source is handing over blank frames, which is indistinguishable
             // downstream from a working pipeline carrying a black picture.
             let brightest = match &frame.pixels {
-                Pixels::Rgba(data) => data.iter().copied().max().unwrap_or(0),
+                Pixels::Rgba(data) | Pixels::Bgra(data) => data.iter().copied().max().unwrap_or(0),
                 Pixels::I420 { y, .. } => y.iter().copied().max().unwrap_or(0),
             };
             tracing::info!("bevy_iroh: encoding {w}x{h} video, brightest byte {brightest}");
@@ -136,6 +138,17 @@ pub(crate) fn run_encoder(
                     *buffer = YUVBuffer::new(w, h);
                 }
                 buffer.read_rgba8(RgbaSliceU8::new(&data[..w * h * 4], (w, h)));
+                encoder.encode_at(buffer, pts)
+            }
+            Pixels::Bgra(data) => {
+                if data.len() < w * h * 4 {
+                    continue;
+                }
+                let buffer = yuv.get_or_insert_with(|| YUVBuffer::new(w, h));
+                if buffer.dimensions() != (w, h) {
+                    *buffer = YUVBuffer::new(w, h);
+                }
+                buffer.read_bgra8(BgraSliceU8::new(&data[..w * h * 4], (w, h)));
                 encoder.encode_at(buffer, pts)
             }
             Pixels::I420 { y, u, v } => {

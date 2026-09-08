@@ -147,6 +147,15 @@ impl Glide {
     pub fn target(&self) -> Transform {
         self.to
     }
+
+    /// How fast the glide is moving, in metres per second: zero once it has arrived. What an
+    /// avatar's gait can follow.
+    pub fn travel(&self) -> f32 {
+        if self.progress >= 1.0 || self.over <= 0.0 {
+            return 0.0;
+        }
+        (self.to.translation - self.from.translation).length() / self.over
+    }
 }
 
 pub(crate) fn glide(
