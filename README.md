@@ -100,7 +100,10 @@ The core transport runs in a page as it is: iroh reaches the relays over WebSock
 out of the address bar (`web::ticket_from_url("join")`). `scripts/web.sh` builds the cube
 example for the browser and serves it; open `http://localhost:8000/?join=<ticket>` from a
 `cargo run --example host`, a headless peer that keeps a room alive with an orbiting cube.
-Voice and video in the browser are not there yet: the codecs are C builds.
+`tests/wasm.rs` runs two apps in one page against the real relay under `wasm-bindgen-test`
+(`cargo test --profile wasm-test --target wasm32-unknown-unknown --features wasm --test wasm`
+with geckodriver or chromedriver on `PATH`). Voice and video in the browser are not there yet:
+the codecs are C builds.
 
 ## Status
 

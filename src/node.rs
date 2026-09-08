@@ -144,6 +144,18 @@ impl Iroh {
         &self.display_name
     }
 
+    /// Add a relay to the running endpoint: for a relay list that arrives from a service after
+    /// startup. The endpoint keeps the ones it was built with.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn add_relay(&self, config: iroh::RelayConfig) {
+        let endpoint = self.endpoint();
+        let _ = self.spawn(async move {
+            endpoint
+                .insert_relay(config.url.clone(), Arc::new(config))
+                .await;
+        });
+    }
+
     /// Where this node can be reached right now, for anything that publishes it. In a page,
     /// `None` until the endpoint has bound.
     #[cfg(not(target_arch = "wasm32"))]
