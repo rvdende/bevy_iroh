@@ -1,0 +1,43 @@
+[package]
+name = "bevy_iroh"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+description = "Share Bevy entities between peers over iroh: replication, rooms, presence and typed messages, with optional voice and video"
+repository = "https://github.com/rvdende/bevy_iroh"
+documentation = "https://docs.rs/bevy_iroh"
+readme = "README.md"
+keywords = ["bevy", "iroh", "p2p", "networking", "multiplayer"]
+categories = ["game-development", "network-programming"]
+
+[features]
+default = []
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = ["bevy_log", "std"] }
+iroh = "1.1"
+iroh-gossip = "0.101"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+rand = "0.10"
+n0-future = "0.3"
+tracing = "0.1"
+thiserror = "2"
+data-encoding = "2"
+anyhow = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["sync", "macros"] }
+web-time = "1"
+
+[dev-dependencies]
+bevy = { version = "0.19", features = ["wayland", "x11"] }
+tempfile = "3"
+rand = "0.10"
+
+[profile.dev.package."*"]
+opt-level = 3
