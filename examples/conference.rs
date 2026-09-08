@@ -6,7 +6,10 @@
 //! ```
 //!
 //! Arrow keys move you; the sound of each peer comes from where they are. `M` mutes.
+//! Everyone also shows a picture above their sphere: a moving test pattern here, since the
+//! crate has no camera of its own; a `VideoSource` of yours goes in the same place.
 //! Headphones: there is no echo cancellation.
+#![allow(clippy::type_complexity)]
 
 use bevy::prelude::*;
 use bevy_iroh::prelude::*;
@@ -25,7 +28,10 @@ fn main() {
         ))
         .replicate::<Avatar>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (drive, mute, swell, print_ticket, announce))
+        .add_systems(
+            Update,
+            (drive, mute, swell, print_ticket, announce, screens),
+        )
         .add_observer(dress)
         .run();
 }
@@ -48,6 +54,8 @@ fn setup(
             hue: rand::random::<f32>() * 360.0,
         },
         Voice::default(),
+        VideoFeed::new(320, 240),
+        VideoInput::new(TestPattern::new(320, 240, 15.0)),
         Shared::default(),
         Transform::from_xyz(
             rand::random::<f32>() * 4.0 - 2.0,
@@ -157,5 +165,32 @@ fn announce(
     }
     for l in left.read() {
         info!("{} left", l.id.fmt_short());
+    }
+}
+
+/// A screen floats above each avatar; a remote one shows their picture once it arrives.
+#[derive(Component)]
+struct Screen;
+
+fn screens(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    arrived: Query<(Entity, &VideoImage), (With<Avatar>, Added<VideoImage>)>,
+) {
+    for (entity, image) in &arrived {
+        let screen = commands
+            .spawn((
+                Screen,
+                Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.8, 0.6)))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color_texture: Some(image.0.clone()),
+                    unlit: true,
+                    ..default()
+                })),
+                Transform::from_xyz(0.0, 1.4, 0.0),
+            ))
+            .id();
+        commands.entity(entity).add_child(screen);
     }
 }

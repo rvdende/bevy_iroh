@@ -7,6 +7,7 @@
 
 pub mod audio;
 pub mod transport;
+pub mod video;
 
 use std::sync::{
     Arc, Mutex,
@@ -17,7 +18,10 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use audio::{AudioOutput, AudioSource, Microphone, Mixer, RemoteTrack, Speaker};
-pub use transport::{ALPN, MediaHub};
+pub use transport::{ALPN, MediaHub, TrackKind};
+pub use video::{
+    Pixels, RemoteVideo, RgbaFrame, TestPattern, VideoConfig, VideoFrame, VideoSource,
+};
 
 use crate::{
     node::Iroh,
@@ -35,6 +39,46 @@ pub struct Voice {
 /// remote ones from what was decoded. For meters.
 #[derive(Component, Debug, Clone, Copy, Default, Deref)]
 pub struct VoiceLevel(pub f32);
+
+/// This entity shows a picture: publish frames under its id. Replicated, so peers subscribe.
+/// Pair it locally with a [`VideoInput`] naming where the frames come from.
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+pub struct VideoFeed {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl VideoFeed {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+/// The local half of a [`VideoFeed`]: the source and how to encode it. Not replicated.
+#[derive(Component)]
+pub struct VideoInput {
+    source: Mutex<Option<Box<dyn VideoSource>>>,
+    pub config: VideoConfig,
+}
+
+impl VideoInput {
+    pub fn new(source: impl VideoSource) -> Self {
+        Self {
+            source: Mutex::new(Some(Box::new(source))),
+            config: VideoConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: VideoConfig) -> Self {
+        self.config = config;
+        self
+    }
+}
+
+/// On a remote [`VideoFeed`] entity once its first frame has decoded: the picture, kept
+/// current. Put it on any material.
+#[derive(Component, Debug, Clone, Deref)]
+pub struct VideoImage(pub Handle<Image>);
 
 /// Where the ears are. Put it on the camera. Without one, the listener is at the origin.
 #[derive(Component, Debug, Clone, Copy, Default)]
@@ -89,6 +133,8 @@ impl SpeakerChoice {
 #[derive(Resource)]
 pub struct Media {
     pub hub: Arc<MediaHub>,
+    /// Owners whose session dropped this frame, for every subscribe system to see.
+    dead: Vec<iroh::EndpointId>,
     encoder: Option<Encoder>,
     speaker: Option<Arc<AtomicBool>>,
     speaker_failed: bool,
@@ -98,6 +144,16 @@ pub struct Media {
 struct Encoder {
     stop: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+}
+
+/// Per local video feed: the encoder thread's stop flag.
+#[derive(Component)]
+struct Encoding(Arc<AtomicBool>);
+
+impl Drop for Encoding {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Media {
@@ -115,6 +171,7 @@ impl Media {
     pub(crate) fn new(hub: Arc<MediaHub>) -> Self {
         Self {
             hub,
+            dead: Vec::new(),
             encoder: None,
             speaker: None,
             speaker_failed: false,
@@ -188,6 +245,13 @@ struct Subscribed {
     retry_at: f64,
 }
 
+/// The same for a remote video feed. Separate, since one entity can carry both.
+#[derive(Component)]
+struct VideoSubscribed {
+    owner: iroh::EndpointId,
+    retry_at: f64,
+}
+
 /// Per local voice entity: the mute flag shared with the encoder.
 #[derive(Component)]
 struct Published(Arc<AtomicBool>);
@@ -201,8 +265,23 @@ impl Plugin for MediaPlugin {
         app.init_resource::<MediaSettings>()
             .insert_resource(Media::new(self.hub.clone()))
             .replicate::<Voice>()
-            .add_systems(Update, (publish, subscribe, spatialize, levels))
-            .add_observer(on_voice_removed);
+            .replicate::<VideoFeed>()
+            .add_systems(
+                Update,
+                (
+                    collect_dead,
+                    publish,
+                    subscribe,
+                    spatialize,
+                    levels,
+                    publish_video,
+                    subscribe_video,
+                    video_frames,
+                )
+                    .chain(),
+            )
+            .add_observer(on_voice_removed)
+            .add_observer(on_video_removed);
     }
 }
 
@@ -242,7 +321,7 @@ fn subscribe(
 ) {
     let Some(iroh) = iroh else { return };
     let now = time.elapsed_secs_f64();
-    let dead = media.hub.take_dead();
+    let dead = media.dead.clone();
     for (entity, id, owner, subscribed) in &mut voices {
         let due = match subscribed {
             None => true,
@@ -263,7 +342,10 @@ fn subscribe(
         media.ensure_speaker(&settings);
         let (hub, endpoint, owner_id, track) = (media.hub.clone(), iroh.endpoint(), owner.0, id.0);
         iroh.spawn(async move {
-            if let Err(e) = hub.subscribe(endpoint, owner_id, track).await {
+            if let Err(e) = hub
+                .subscribe(endpoint, owner_id, track, TrackKind::Audio)
+                .await
+            {
                 debug!("bevy_iroh: subscribe to {:016x}: {e:#}", track);
                 lock_dead(&hub, owner_id);
             }
@@ -349,5 +431,166 @@ fn levels(media: Res<Media>, mut voices: Query<(&NetId, &mut VoiceLevel, Has<Rem
         if (level.0 - value).abs() > 1e-4 {
             level.0 = value;
         }
+    }
+}
+
+fn collect_dead(mut media: ResMut<Media>) {
+    media.dead = media.hub.take_dead();
+}
+
+fn publish_video(
+    mut commands: Commands,
+    iroh: Option<Res<Iroh>>,
+    media: Res<Media>,
+    feeds: Query<
+        (Entity, &NetId, &VideoInput),
+        (
+            With<Shared>,
+            With<VideoFeed>,
+            Without<Remote>,
+            Without<Encoding>,
+        ),
+    >,
+) {
+    let Some(iroh) = iroh else { return };
+    for (entity, id, input) in &feeds {
+        let Some(source) = input
+            .source
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            continue;
+        };
+        let track = id.0;
+        media.hub.publish(track);
+        let keyframe = media.hub.keyframe_flag(track);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (config, s) = (input.config.clone(), stop.clone());
+        if let Err(e) = std::thread::Builder::new()
+            .name("bevy_iroh-encode".into())
+            .spawn(move || video::run_encoder(source, config, keyframe, s, tx))
+        {
+            error!("bevy_iroh: video encoder: {e}");
+            continue;
+        }
+        let hub = media.hub.clone();
+        iroh.spawn(async move { video::run_publisher(hub, track, rx).await });
+        commands.entity(entity).insert(Encoding(stop));
+    }
+}
+
+fn subscribe_video(
+    mut commands: Commands,
+    iroh: Option<Res<Iroh>>,
+    media: Res<Media>,
+    time: Res<Time<bevy::time::Real>>,
+    mut feeds: Query<
+        (Entity, &NetId, &Owner, Option<&mut VideoSubscribed>),
+        (With<VideoFeed>, With<Remote>),
+    >,
+) {
+    let Some(iroh) = iroh else { return };
+    let now = time.elapsed_secs_f64();
+    let dead = media.dead.clone();
+    for (entity, id, owner, subscribed) in &mut feeds {
+        let due = match subscribed {
+            None => true,
+            Some(mut s) => {
+                if dead.contains(&s.owner) {
+                    s.retry_at = now + RESUBSCRIBE_AFTER;
+                }
+                let due = s.retry_at > 0.0 && now >= s.retry_at;
+                if due {
+                    s.retry_at = 0.0;
+                }
+                due
+            }
+        };
+        if !due {
+            continue;
+        }
+        let (hub, endpoint, owner_id, track) = (media.hub.clone(), iroh.endpoint(), owner.0, id.0);
+        iroh.spawn(async move {
+            if let Err(e) = hub
+                .subscribe(endpoint, owner_id, track, TrackKind::Video)
+                .await
+            {
+                debug!("bevy_iroh: subscribe to video {:016x}: {e:#}", track);
+                hub.mark_dead(owner_id);
+            }
+        });
+        commands.entity(entity).insert(VideoSubscribed {
+            owner: owner.0,
+            retry_at: 0.0,
+        });
+    }
+}
+
+/// Newest decoded frames into images.
+fn video_frames(
+    mut commands: Commands,
+    media: Res<Media>,
+    images: Option<ResMut<Assets<Image>>>,
+    feeds: Query<(Entity, &NetId, Option<&VideoImage>), (With<VideoFeed>, With<Remote>)>,
+) {
+    let Some(mut images) = images else { return };
+    for (entity, id, image) in &feeds {
+        let Some(remote) = media.hub.remote_video(id.0) else {
+            continue;
+        };
+        let Some(frame) = remote.take_frame() else {
+            continue;
+        };
+        let size = wgpu_types::Extent3d {
+            width: frame.width,
+            height: frame.height,
+            depth_or_array_layers: 1,
+        };
+        let reusable = image
+            .filter(|i| {
+                images
+                    .get(&i.0)
+                    .is_some_and(|img| img.texture_descriptor.size == size)
+            })
+            .map(|i| i.0.clone());
+        if let Some(handle) = reusable {
+            if let Some(mut img) = images.get_mut(&handle) {
+                img.data = Some(frame.data);
+            }
+            continue;
+        }
+        let img = Image::new(
+            size,
+            wgpu_types::TextureDimension::D2,
+            frame.data,
+            wgpu_types::TextureFormat::Rgba8UnormSrgb,
+            bevy::asset::RenderAssetUsages::MAIN_WORLD
+                | bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let handle = images.add(img);
+        commands.entity(entity).insert(VideoImage(handle));
+    }
+}
+
+fn on_video_removed(
+    remove: On<Remove, VideoFeed>,
+    iroh: Option<Res<Iroh>>,
+    media: Res<Media>,
+    q: Query<(&NetId, Has<Remote>, Option<&VideoSubscribed>)>,
+) {
+    let Ok((id, remote, subscribed)) = q.get(remove.entity) else {
+        return;
+    };
+    if remote {
+        if let (Some(iroh), Some(s)) = (iroh, subscribed) {
+            let (hub, owner, track) = (media.hub.clone(), s.owner, id.0);
+            iroh.spawn(async move { hub.unsubscribe(owner, track).await });
+        } else {
+            media.hub.forget_remote(id.0);
+        }
+    } else {
+        media.hub.unpublish(id.0);
     }
 }

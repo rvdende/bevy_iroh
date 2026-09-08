@@ -26,7 +26,10 @@ pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask};
 
 pub mod prelude {
     #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
-    pub use crate::media::{AudioListener, MediaSettings, Voice, VoiceLevel};
+    pub use crate::media::{
+        AudioListener, MediaSettings, TestPattern, VideoFeed, VideoImage, VideoInput, Voice,
+        VoiceLevel,
+    };
     pub use crate::{
         Identity, Iroh, IrohPlugin, IrohSet, Relays, RoomTicket, Via,
         message::{MessageAppExt, NetSender, Received},

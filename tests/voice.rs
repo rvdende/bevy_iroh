@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy::prelude::*;
+use bevy::{asset::AssetPlugin, prelude::*};
 use bevy_iroh::{
     media::{AudioOutput, AudioSource, MicrophoneChoice, Mixer, SpeakerChoice},
     prelude::*,
@@ -61,12 +61,15 @@ impl AudioOutput for Capture {
 
 fn app(name: &str, settings: MediaSettings) -> App {
     let mut app = App::new();
-    app.insert_resource(settings).add_plugins((
-        MinimalPlugins,
-        IrohPlugin::default()
-            .with_relays(Relays::Disabled)
-            .with_display_name(name),
-    ));
+    app.insert_resource(settings)
+        .add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            IrohPlugin::default()
+                .with_relays(Relays::Disabled)
+                .with_display_name(name),
+        ))
+        .init_asset::<Image>();
     app
 }
 
@@ -110,8 +113,11 @@ fn a_tone_crosses_between_two_apps() {
     );
 
     alice.world_mut().spawn(Room::host("voice"));
+    // Voice and a picture on one entity, as a conference participant would have.
     alice.world_mut().spawn((
         Voice::default(),
+        VideoFeed::new(64, 48),
+        VideoInput::new(TestPattern::new(64, 48, 10.0)),
         Shared::default(),
         Transform::from_xyz(1.0, 0.0, 0.0),
     ));
@@ -153,6 +159,15 @@ fn a_tone_crosses_between_two_apps() {
         .unwrap()
         .0;
     assert!(level > 0.05, "level {level}");
+
+    // The picture arrives alongside the sound.
+    wait(&mut alice, &mut bob, "the picture", |b| {
+        b.world_mut()
+            .query_filtered::<&VideoImage, With<Remote>>()
+            .iter(b.world())
+            .next()
+            .is_some()
+    });
 
     // Muting stops it.
     let mine = alice

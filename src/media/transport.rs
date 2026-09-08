@@ -22,14 +22,27 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::audio::RemoteTrack;
+use super::{
+    audio::RemoteTrack,
+    video::{RemoteVideo, VideoPacket},
+};
 
 pub const ALPN: &[u8] = b"bevy_iroh/media/1";
 
-/// The first byte of a datagram.
+/// The first byte of a datagram or a stream.
 const TAG_AUDIO: u8 = 1;
+const TAG_VIDEO: u8 = 2;
 /// track (8) + seq (4) after the tag.
 const HEADER: usize = 1 + 8 + 4;
+/// The largest encoded video frame accepted: a hostile length prefix must not allocate more.
+const MAX_VIDEO_FRAME: usize = 8 << 20;
+
+/// What a track carries, so a subscription knows what to build for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Audio,
+    Video,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Control {
@@ -44,8 +57,12 @@ pub struct MediaHub {
     published: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     /// Who subscribed to each of my tracks.
     subscribers: Mutex<HashMap<u64, Vec<Connection>>>,
-    /// Tracks I subscribe to, by id: where their frames land.
+    /// Audio tracks I subscribe to, by id: where their frames land.
     remote: Mutex<HashMap<u64, Arc<RemoteTrack>>>,
+    /// Video tracks I subscribe to.
+    remote_video: Mutex<HashMap<u64, Arc<RemoteVideo>>>,
+    /// Video tracks I publish: a keyframe is wanted when a subscriber arrives mid-group.
+    keyframe_wanted: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     /// One dialled connection per owner, and the control stream on it.
     sessions: tokio::sync::Mutex<HashMap<EndpointId, Session>>,
     /// Sessions that died, for the Bevy side to resubscribe through.
@@ -82,6 +99,24 @@ impl MediaHub {
     pub fn unpublish(&self, track: u64) {
         lock(&self.published).remove(&track);
         lock(&self.subscribers).remove(&track);
+        lock(&self.keyframe_wanted).remove(&track);
+    }
+
+    /// The flag a video encoder checks before each frame: set when a subscriber joined
+    /// mid-group and cannot decode anything until the next keyframe.
+    pub fn keyframe_flag(&self, track: u64) -> Arc<AtomicBool> {
+        lock(&self.keyframe_wanted)
+            .entry(track)
+            .or_insert_with(|| Arc::new(AtomicBool::new(true)))
+            .clone()
+    }
+
+    /// The connections currently subscribed to `track`, for a video group to be opened on.
+    pub(crate) fn subscribers_of(&self, track: u64) -> Vec<Connection> {
+        lock(&self.subscribers)
+            .get(&track)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn published(&self) -> Vec<(u64, Arc<AtomicBool>)> {
@@ -128,6 +163,10 @@ impl MediaHub {
             .collect()
     }
 
+    pub fn remote_video(&self, track: u64) -> Option<Arc<RemoteVideo>> {
+        lock(&self.remote_video).get(&track).cloned()
+    }
+
     /// Owners whose session dropped since the last call. Their tracks need subscribing again.
     pub fn take_dead(&self) -> Vec<EndpointId> {
         std::mem::take(&mut *lock(&self.dead))
@@ -140,6 +179,7 @@ impl MediaHub {
     /// Stop playing a track without a session to tell.
     pub fn forget_remote(&self, track: u64) {
         lock(&self.remote).remove(&track);
+        lock(&self.remote_video).remove(&track);
     }
 
     /// Subscribe to `track` from `owner`, dialling them if there is no session yet.
@@ -149,10 +189,20 @@ impl MediaHub {
         endpoint: Endpoint,
         owner: EndpointId,
         track: u64,
+        kind: TrackKind,
     ) -> anyhow::Result<()> {
-        lock(&self.remote)
-            .entry(track)
-            .or_insert_with(|| Arc::new(RemoteTrack::new()));
+        match kind {
+            TrackKind::Audio => {
+                lock(&self.remote)
+                    .entry(track)
+                    .or_insert_with(|| Arc::new(RemoteTrack::new()));
+            }
+            TrackKind::Video => {
+                lock(&self.remote_video)
+                    .entry(track)
+                    .or_insert_with(|| Arc::new(RemoteVideo::new()));
+            }
+        }
         let mut sessions = self.sessions.lock().await;
         if !sessions.contains_key(&owner) {
             let conn = endpoint.connect(EndpointAddr::new(owner), ALPN).await?;
@@ -164,6 +214,9 @@ impl MediaHub {
                 hub.sessions.lock().await.remove(&owner);
                 lock(&hub.dead).push(owner);
             });
+            let hub = self.clone();
+            let streams = conn.clone();
+            n0_future::task::spawn(async move { hub.read_streams(streams).await });
             sessions.insert(
                 owner,
                 Session {
@@ -183,6 +236,7 @@ impl MediaHub {
 
     pub async fn unsubscribe(self: &Arc<Self>, owner: EndpointId, track: u64) {
         lock(&self.remote).remove(&track);
+        lock(&self.remote_video).remove(&track);
         let mut sessions = self.sessions.lock().await;
         let Some(session) = sessions.get_mut(&owner) else {
             return;
@@ -213,6 +267,77 @@ impl MediaHub {
         }
     }
 
+    /// One stream per video group: a header naming the track and the group, then frames until
+    /// the publisher finishes it at the next keyframe.
+    async fn read_streams(self: Arc<Self>, conn: Connection) {
+        while let Ok(mut recv) = conn.accept_uni().await {
+            let hub = self.clone();
+            let hub_remote = move |track: u64| hub.remote_video(track);
+            n0_future::task::spawn(async move {
+                let mut header = [0u8; 1 + 8 + 4];
+                if recv.read_exact(&mut header).await.is_err() || header[0] != TAG_VIDEO {
+                    return;
+                }
+                let track = u64::from_le_bytes(header[1..9].try_into().expect("8 bytes"));
+                let group = u32::from_le_bytes(header[9..13].try_into().expect("4 bytes"));
+                let Some(remote) = hub_remote(track) else {
+                    return;
+                };
+                loop {
+                    let mut head = [0u8; 4 + 1 + 8];
+                    if recv.read_exact(&mut head).await.is_err() {
+                        return;
+                    }
+                    let len = u32::from_le_bytes(head[0..4].try_into().expect("4 bytes")) as usize;
+                    if len > MAX_VIDEO_FRAME {
+                        return;
+                    }
+                    let keyframe = head[4] & 1 != 0;
+                    let pts_ms = u64::from_le_bytes(head[5..13].try_into().expect("8 bytes"));
+                    let mut data = vec![0u8; len];
+                    if recv.read_exact(&mut data).await.is_err() {
+                        return;
+                    }
+                    remote.push(VideoPacket {
+                        group,
+                        keyframe,
+                        pts_ms,
+                        data,
+                    });
+                }
+            });
+        }
+    }
+
+    /// Write one video frame to a group stream. `None` returns are the stream having gone.
+    pub(crate) async fn write_video_frame(
+        stream: &mut SendStream,
+        packet: &VideoPacket,
+    ) -> anyhow::Result<()> {
+        let mut head = Vec::with_capacity(13);
+        head.extend_from_slice(&(packet.data.len() as u32).to_le_bytes());
+        head.push(packet.keyframe as u8);
+        head.extend_from_slice(&packet.pts_ms.to_le_bytes());
+        stream.write_all(&head).await?;
+        stream.write_all(&packet.data).await?;
+        Ok(())
+    }
+
+    /// Open a group stream on `conn` for `track`.
+    pub(crate) async fn open_group(
+        conn: &Connection,
+        track: u64,
+        group: u32,
+    ) -> anyhow::Result<SendStream> {
+        let mut stream = conn.open_uni().await?;
+        let mut header = Vec::with_capacity(13);
+        header.push(TAG_VIDEO);
+        header.extend_from_slice(&track.to_le_bytes());
+        header.extend_from_slice(&group.to_le_bytes());
+        stream.write_all(&header).await?;
+        Ok(stream)
+    }
+
     // -- accept side ------------------------------------------------------------------------
 
     async fn serve(&self, conn: Connection) {
@@ -230,6 +355,11 @@ impl MediaHub {
                     let conns = subs.entry(track).or_default();
                     if !conns.iter().any(|c| c.stable_id() == id) {
                         conns.push(conn.clone());
+                    }
+                    drop(subs);
+                    // A video subscriber can decode nothing until a keyframe.
+                    if let Some(flag) = lock(&self.keyframe_wanted).get(&track) {
+                        flag.store(true, Ordering::Relaxed);
                     }
                 }
                 Control::Unsubscribe { track } => {
