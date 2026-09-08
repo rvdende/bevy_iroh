@@ -15,7 +15,7 @@ categories = ["game-development", "network-programming"]
 default = []
 ## Voice over the same endpoint: `Voice` on a shared entity publishes the microphone, remote
 ## voices play back spatially. Pulls in cpal and libopus (built from source with cmake).
-media = ["dep:cpal", "dep:opus", "dep:openh264", "dep:bytes", "dep:wgpu-types", "bevy/bevy_asset", "bevy/bevy_image"]
+media = ["dep:cpal", "dep:opus", "dep:openh264", "dep:bytes", "bevy/bevy_asset", "bevy/bevy_image"]
 ## A `bevy_v4l2` webcam as a `VideoSource`: `VideoInput::new(feed.capture.color_tap())`. Linux.
 v4l2 = ["media", "dep:bevy_v4l2"]
 ## What only a browser has: an identity in localStorage and the ticket from the page URL. The
@@ -35,14 +35,12 @@ thiserror = "2"
 data-encoding = "2"
 anyhow = "1"
 bytes = { version = "1", optional = true }
-# The texture types `Image::new` takes; bevy_image does not re-export them.
-wgpu-types = { version = "29", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 cpal = { version = "0.18", optional = true }
 opus = { version = "0.4", optional = true }
-openh264 = { version = "0.9", optional = true }
+openh264 = { version = "0.9.8", optional = true }
 bevy_v4l2 = { version = "0.3", optional = true, default-features = false, features = ["mjpeg"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

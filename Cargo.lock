@@ -1185,7 +1185,6 @@ dependencies = [
  "wasm-bindgen-test",
  "web-sys",
  "web-time",
- "wgpu-types",
 ]
 
 [[package]]

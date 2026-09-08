@@ -602,16 +602,14 @@ fn video_frames(
         let Some(frame) = remote.take_frame() else {
             continue;
         };
-        let size = wgpu_types::Extent3d {
-            width: frame.width,
-            height: frame.height,
-            depth_or_array_layers: 1,
-        };
+        // Built from the default image rather than by naming texture types, which come from
+        // whichever wgpu this bevy is built against.
         let reusable = image
             .filter(|i| {
-                images
-                    .get(&i.0)
-                    .is_some_and(|img| img.texture_descriptor.size == size)
+                images.get(&i.0).is_some_and(|img| {
+                    img.texture_descriptor.size.width == frame.width
+                        && img.texture_descriptor.size.height == frame.height
+                })
             })
             .map(|i| i.0.clone());
         if let Some(handle) = reusable {
@@ -620,14 +618,13 @@ fn video_frames(
             }
             continue;
         }
-        let img = Image::new(
-            size,
-            wgpu_types::TextureDimension::D2,
-            frame.data,
-            wgpu_types::TextureFormat::Rgba8UnormSrgb,
-            bevy::asset::RenderAssetUsages::MAIN_WORLD
-                | bevy::asset::RenderAssetUsages::RENDER_WORLD,
-        );
+        let mut img = Image::default();
+        img.texture_descriptor.size.width = frame.width;
+        img.texture_descriptor.size.height = frame.height;
+        img.texture_descriptor.size.depth_or_array_layers = 1;
+        img.asset_usage = bevy::asset::RenderAssetUsages::MAIN_WORLD
+            | bevy::asset::RenderAssetUsages::RENDER_WORLD;
+        img.data = Some(frame.data);
         let handle = images.add(img);
         commands.entity(entity).insert(VideoImage(handle));
     }
