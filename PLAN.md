@@ -1,5 +1,10 @@
 # bevy_iroh — plan
 
+**Status (2026-09-08):** M1–M3 built and pushed to github.com/rvdende/bevy_iroh: node, rooms,
+presence, replication with codecs, typed messages, the cube example, and the two-app test.
+M4 polish is partly done (docs, README). Media (M5–M7) is next, with the MoQ session adapter
+copied in-tree so nothing depends on iroh-live.
+
 A Bevy plugin that makes entities shareable between peers over [iroh](https://iroh.computer):
 QUIC dialled by public key, hole punching with relay fallback, gossip for the group, direct
 streams for one peer. Clean sheet, informed by what `robot2/crates/substrate-net` and
