@@ -193,18 +193,23 @@ impl Media {
             return;
         }
         let source: Option<Box<dyn AudioSource>> = match &settings.microphone {
-            MicrophoneChoice::None => None,
+            MicrophoneChoice::None => {
+                self.mic_failed = true;
+                None
+            }
+            // An empty slot is a source that is not ready yet, not one that failed: the app
+            // fills it when its device opens, and this is asked again every frame until then.
             MicrophoneChoice::Custom(slot) => slot.lock().unwrap_or_else(|e| e.into_inner()).take(),
             MicrophoneChoice::Default => match Microphone::default_device() {
                 Ok(m) => Some(Box::new(m)),
                 Err(e) => {
                     error!("bevy_iroh: microphone: {e}");
+                    self.mic_failed = true;
                     None
                 }
             },
         };
         let Some(source) = source else {
-            self.mic_failed = true;
             return;
         };
         info!("bevy_iroh: microphone at {} Hz", source.sample_rate());
@@ -220,6 +225,15 @@ impl Media {
             return;
         }
         self.encoder = Some(Encoder { stop, level });
+    }
+
+    /// Stop the encoder so the next local `Voice` opens the microphone again: for a device
+    /// change, or a new source in `MediaSettings::microphone`.
+    pub fn restart_microphone(&mut self) {
+        if let Some(e) = self.encoder.take() {
+            e.stop.store(true, Ordering::Relaxed);
+        }
+        self.mic_failed = false;
     }
 
     fn ensure_speaker(&mut self, settings: &MediaSettings) {

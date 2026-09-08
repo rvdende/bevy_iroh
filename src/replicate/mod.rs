@@ -233,6 +233,21 @@ impl Registry {
     }
 }
 
+/// How a remote entity comes to exist. The default is a bare `spawn`; an app whose entities
+/// are kinds with their own spawn path sets one with
+/// [`ReplicateAppExt::spawn_remote_with`], gets the wire components to look at, and returns
+/// the entity the replicated components should land on.
+#[derive(Resource)]
+pub struct RemoteSpawner(
+    pub Box<dyn Fn(&mut World, &[wire::Component]) -> Option<Entity> + Send + Sync>,
+);
+
+impl Default for RemoteSpawner {
+    fn default() -> Self {
+        RemoteSpawner(Box::new(|world, _| Some(world.spawn_empty().id())))
+    }
+}
+
 /// Component removals and despawns noticed by observers, for the send system to announce.
 #[derive(Resource, Default)]
 pub(crate) struct Outbox {
@@ -256,6 +271,14 @@ pub trait ReplicateAppExt {
 
     /// Replicate through a codec of your own.
     fn replicate_with<C: Codec>(&mut self, codec: C) -> &mut Self;
+
+    /// Decide how a remote entity is created, from its wire components, before they are
+    /// applied to it. For apps whose entities are spawned by kind rather than assembled from
+    /// components.
+    fn spawn_remote_with(
+        &mut self,
+        spawner: impl Fn(&mut World, &[wire::Component]) -> Option<Entity> + Send + Sync + 'static,
+    ) -> &mut Self;
 }
 
 impl ReplicateAppExt for App {
@@ -272,6 +295,14 @@ impl ReplicateAppExt for App {
         self.add_observer(send::on_remove_source::<C>);
         self
     }
+
+    fn spawn_remote_with(
+        &mut self,
+        spawner: impl Fn(&mut World, &[wire::Component]) -> Option<Entity> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.insert_resource(RemoteSpawner(Box::new(spawner)));
+        self
+    }
 }
 
 pub(crate) struct ReplicatePlugin {
@@ -284,6 +315,7 @@ impl Plugin for ReplicatePlugin {
             .init_resource::<NetIds>()
             .init_resource::<Outbox>()
             .init_resource::<Snapshots>()
+            .init_resource::<RemoteSpawner>()
             .add_systems(PreUpdate, apply::apply.in_set(Receive::Replicate))
             .add_systems(Update, transform::glide)
             .add_systems(
@@ -293,7 +325,8 @@ impl Plugin for ReplicatePlugin {
                     .in_set(IrohSet::Send),
             )
             .add_observer(send::on_remove_shared)
-            .add_observer(apply::on_room_left);
+            .add_observer(apply::on_room_left)
+            .add_systems(PreUpdate, apply::on_peer_left.in_set(Receive::Replicate));
         if self.transform {
             app.replicate_with(TransformCodec::default());
         }

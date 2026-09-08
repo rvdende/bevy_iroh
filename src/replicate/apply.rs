@@ -5,12 +5,13 @@ use iroh::EndpointId;
 use iroh_gossip::proto::TopicId;
 
 use super::{
-    Authority, InRoom, NetId, NetIds, Owner, Registry, Remote, Replica, Shared, Snapshots, wire,
+    Authority, InRoom, NetId, NetIds, Owner, Registry, Remote, RemoteSpawner, Replica, Shared,
+    Snapshots, wire,
 };
 use crate::{
     net::{Frame, Kind, Payload, proto::MAX_ITEMS},
     node::{Inbox, Iroh, ToNet},
-    room::{RoomTopic, Rooms},
+    room::{PeerLeft, RoomTopic, Rooms},
 };
 
 const KINDS: [Kind; 7] = [
@@ -156,19 +157,26 @@ impl Cx<'_> {
     fn spawn(&mut self, topic: TopicId, room: Entity, from: EndpointId, spawn: wire::Spawn) {
         let entity = match self.entity(spawn.id) {
             None => {
+                // The app may want to build the entity its own way first.
                 let e = self
                     .world
-                    .spawn((
-                        spawn.id,
-                        Shared {
-                            authority: spawn.authority,
-                        },
-                        Owner(spawn.owner),
-                        Remote,
-                        InRoom(room),
-                        Replica::remote(spawn.lamport, topic),
-                    ))
-                    .id();
+                    .resource_scope(|world, spawner: Mut<RemoteSpawner>| {
+                        (spawner.0)(world, &spawn.components)
+                    });
+                let Some(e) = e else {
+                    debug!("bevy_iroh: the app declined to spawn {}", spawn.id);
+                    return;
+                };
+                self.world.entity_mut(e).insert((
+                    spawn.id,
+                    Shared {
+                        authority: spawn.authority,
+                    },
+                    Owner(spawn.owner),
+                    Remote,
+                    InRoom(room),
+                    Replica::remote(spawn.lamport, topic),
+                ));
                 self.world.resource_mut::<NetIds>().insert(spawn.id, e);
                 e
             }
@@ -318,6 +326,28 @@ impl Cx<'_> {
                 kind: wire::SnapshotRequest::KIND,
                 body,
             });
+        }
+    }
+}
+
+/// A peer that left, or fell silent, takes its entities with it. Their owner's `Despawn` may
+/// never come: a closed laptop sends nothing.
+pub(crate) fn on_peer_left(
+    mut left: MessageReader<PeerLeft>,
+    mut commands: Commands,
+    topics: Query<&RoomTopic>,
+    mut ids: ResMut<NetIds>,
+    replicas: Query<(Entity, &NetId, &Owner, &Replica), With<Remote>>,
+) {
+    for gone in left.read() {
+        let Ok(topic) = topics.get(gone.room) else {
+            continue;
+        };
+        for (entity, id, owner, replica) in &replicas {
+            if owner.0 == gone.id && replica.from_topic == Some(topic.0) {
+                ids.remove(*id);
+                commands.entity(entity).despawn();
+            }
         }
     }
 }
