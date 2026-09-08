@@ -1,0 +1,5 @@
+# `cargo test --target wasm32-unknown-unknown --features wasm` runs tests/wasm.rs in a headless
+# browser through wasm-bindgen-test-runner (`cargo install wasm-bindgen-cli`), using geckodriver
+# or chromedriver from PATH (`GECKODRIVER=... ` / `CHROMEDRIVER=...` to point at one).
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

@@ -9,6 +9,7 @@
 pub mod direct;
 pub mod identity;
 pub mod proto;
+pub mod stats;
 pub mod ticket;
 
 use std::{

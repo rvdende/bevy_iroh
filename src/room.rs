@@ -16,7 +16,7 @@ use crate::{
         self, Kind, Payload, RoomTicket,
         proto::{Goodbye, Hello},
     },
-    node::{FromNet, Inbox, Iroh, Receive, Timing, ToNet},
+    node::{FromNet, Inbox, Iroh, NetStats, Receive, Timing, ToNet},
 };
 
 /// A room: a topic and its members. Spawn one with [`Room::host`] or [`Room::join`].
@@ -184,7 +184,10 @@ impl Plugin for RoomPlugin {
                     (presence_in, reap).chain().in_set(Receive::Rooms),
                 ),
             )
-            .add_systems(PostUpdate, (request, presence_out).in_set(IrohSet::Send))
+            .add_systems(
+                PostUpdate,
+                (request, presence_out, measure).in_set(IrohSet::Send),
+            )
             .add_observer(leave_on_despawn);
     }
 }
@@ -226,6 +229,7 @@ fn drain(
     iroh: Option<ResMut<Iroh>>,
     mut rooms: ResMut<Rooms>,
     mut inbox: ResMut<Inbox>,
+    mut stats: ResMut<NetStats>,
     mut presence: Query<&mut Presence>,
 ) {
     let Some(mut iroh) = iroh else { return };
@@ -270,6 +274,7 @@ fn drain(
                 }
             }
             FromNet::Failed { room: None, why } => error!("bevy_iroh: {why}"),
+            FromNet::Stats(sample) => stats.0 = Some(sample),
             FromNet::Event(net::Event::Frame(frame)) => inbox.frames.push(frame),
             FromNet::Event(net::Event::Neighbor {
                 topic, up: true, ..
@@ -434,4 +439,30 @@ fn leave_on_despawn(
         }
         iroh.send(ToNet::Leave { topic: topic.0 });
     }
+}
+
+/// Tell the node who to measure round trips to, whenever the member list changes.
+fn measure(
+    iroh: Option<Res<Iroh>>,
+    changed: Query<(), (With<Peer>, Or<(Added<Peer>, Changed<Peer>)>)>,
+    mut removed: RemovedComponents<Peer>,
+    peers: Query<&Peer>,
+) {
+    let Some(iroh) = iroh else { return };
+    let removed_any = removed.read().next().is_some();
+    if changed.is_empty() && !removed_any {
+        return;
+    }
+    let mut list: Vec<(EndpointId, Option<String>)> = Vec::new();
+    for peer in &peers {
+        match list.iter_mut().find(|(id, _)| *id == peer.id) {
+            Some((_, name)) => {
+                if name.is_none() {
+                    *name = peer.name.clone();
+                }
+            }
+            None => list.push((peer.id, peer.name.clone())),
+        }
+    }
+    iroh.send(ToNet::Peers(list));
 }

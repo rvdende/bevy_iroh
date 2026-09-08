@@ -21,7 +21,10 @@ use iroh::{Endpoint, EndpointId, SecretKey, protocol::DynProtocolHandler};
 use iroh_gossip::proto::TopicId;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::net::{self, Config, Kind, Node, Relays, RoomTicket, Topic};
+use crate::net::{
+    self, Config, Kind, Node, Relays, RoomTicket, Topic,
+    stats::{SAMPLE_EVERY, Sampler, Stats},
+};
 
 /// How long a host waits for a relay before minting a ticket anyway. Without a relay the
 /// ticket carries direct addresses only and works on the local network.
@@ -58,6 +61,8 @@ pub(crate) enum ToNet {
         kind: Kind,
         body: Vec<u8>,
     },
+    /// Who to measure round trips to.
+    Peers(Vec<(EndpointId, Option<String>)>),
     SendTo {
         topic: TopicId,
         to: EndpointId,
@@ -79,7 +84,13 @@ pub(crate) enum FromNet {
         why: String,
     },
     Event(net::Event),
+    Stats(Stats),
 }
+
+/// The last once-a-second sample of the wire: bytes, rates, relay share, a round trip per
+/// peer, and this node's current address. `None` until the first sample.
+#[derive(Resource, Default, Debug)]
+pub struct NetStats(pub Option<Stats>);
 
 /// The running node, as a resource. Present once the endpoint is bound.
 ///
@@ -131,6 +142,18 @@ impl Iroh {
 
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    /// Where this node can be reached right now, for anything that publishes it. In a page,
+    /// `None` until the endpoint has bound.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn addr(&self) -> Option<iroh::EndpointAddr> {
+        Some(self.endpoint.addr())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn addr(&self) -> Option<iroh::EndpointAddr> {
+        self.endpoint().map(|e| e.addr())
     }
 
     /// Run a future on the network runtime. Poll the returned task from a system.
@@ -308,6 +331,7 @@ impl Plugin for IrohPlugin {
             heartbeat: self.heartbeat,
         });
         app.init_resource::<Inbox>();
+        app.init_resource::<NetStats>();
         app.configure_sets(PreUpdate, IrohSet::Receive);
         app.configure_sets(
             PreUpdate,
@@ -469,13 +493,26 @@ async fn run(
     ready(Ok((node.id(), node.endpoint().clone())));
 
     let mut topics: std::collections::HashMap<TopicId, Topic> = Default::default();
+    let mut peers: Vec<(EndpointId, Option<String>)> = Vec::new();
+    let mut sampler = Sampler::new();
+    let mut sampled = n0_future::time::Instant::now();
+    let ctx = node.ctx();
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        // On elapsed time rather than on a timer arm: the sleep arm only fires on an idle loop.
+        if sampled.elapsed() >= SAMPLE_EVERY {
+            sampled = n0_future::time::Instant::now();
+            let _ = out.send(FromNet::Stats(sampler.sample(&ctx, &peers)));
+        }
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
+                if let ToNet::Peers(list) = command {
+                    peers = list;
+                    continue;
+                }
                 let room = match &command {
                     ToNet::Host { room, .. } | ToNet::Join { room, .. } => Some(*room),
                     _ => None,
@@ -550,6 +587,7 @@ async fn apply(
                 .await
                 .map_err(|e| format!("{e:#}"))?;
         }
+        ToNet::Peers(_) => {}
         ToNet::SendTo {
             topic,
             to,

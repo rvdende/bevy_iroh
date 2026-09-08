@@ -55,8 +55,10 @@ wasm-bindgen = { version = "0.2", optional = true }
 features = ["media", "v4l2"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-# The cube example puts the room's status in the tab title.
-web-sys = { version = "0.3", features = ["Window", "Document"] }
+# The cube example puts the room's status in the tab title; the wasm test logs to the console.
+web-sys = { version = "0.3", features = ["Window", "Document", "console"] }
+wasm-bindgen-test = "0.3"
+web-time = "1"
 
 [dev-dependencies]
 bevy = { version = "0.19", features = ["wayland", "x11"] }

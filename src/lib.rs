@@ -23,8 +23,11 @@ pub mod web;
 
 pub use iroh;
 pub use iroh_gossip::proto::TopicId;
-pub use net::{Relays, RoomTicket, Via};
-pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask};
+pub use net::{
+    Relays, RoomTicket, Via,
+    stats::{Link, Stats},
+};
+pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};
 
 pub mod prelude {
     #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
@@ -33,7 +36,7 @@ pub mod prelude {
         VoiceLevel, VoiceStats,
     };
     pub use crate::{
-        Identity, Iroh, IrohPlugin, IrohSet, Relays, RoomTicket, Via,
+        Identity, Iroh, IrohPlugin, IrohSet, Link, NetStats, Relays, RoomTicket, Stats, Via,
         message::{MessageAppExt, NetSender, Received},
         replicate::{
             Authority, Codec, DecodeCx, EncodeCx, Glide, InRoom, NetId, Owner, Rate, Rejected,
