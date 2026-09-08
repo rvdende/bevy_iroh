@@ -11,6 +11,8 @@
 //! ```
 #![allow(clippy::type_complexity)]
 
+#[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+pub mod media;
 pub mod message;
 pub mod net;
 pub mod node;
@@ -23,6 +25,8 @@ pub use net::{Relays, RoomTicket, Via};
 pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask};
 
 pub mod prelude {
+    #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+    pub use crate::media::{AudioListener, MediaSettings, Voice, VoiceLevel};
     pub use crate::{
         Identity, Iroh, IrohPlugin, IrohSet, Relays, RoomTicket, Via,
         message::{MessageAppExt, NetSender, Received},

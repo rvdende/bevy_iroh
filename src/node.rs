@@ -264,8 +264,19 @@ impl Plugin for IrohPlugin {
                 }
             },
         };
-        let protocols =
+        #[allow(unused_mut)]
+        let mut protocols =
             std::mem::take(&mut *self.protocols.lock().unwrap_or_else(|e| e.into_inner()));
+        #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+        let hub = {
+            let hub = Arc::new(crate::media::MediaHub::default());
+            protocols.push((
+                crate::media::ALPN.to_vec(),
+                Box::new(crate::media::transport::MediaHandler { hub: hub.clone() })
+                    as Box<dyn DynProtocolHandler>,
+            ));
+            hub
+        };
         let config = Config {
             secret_key: secret,
             relays: self.relays.clone(),
@@ -303,6 +314,8 @@ impl Plugin for IrohPlugin {
                 transform: self.replicate_transform,
             },
         ));
+        #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+        app.add_plugins(crate::media::MediaPlugin { hub });
     }
 }
 

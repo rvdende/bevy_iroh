@@ -1,6 +1,6 @@
 [package]
 name = "bevy_iroh"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
@@ -13,6 +13,9 @@ categories = ["game-development", "network-programming"]
 
 [features]
 default = []
+## Voice over the same endpoint: `Voice` on a shared entity publishes the microphone, remote
+## voices play back spatially. Pulls in cpal and libopus (built from source with cmake).
+media = ["dep:cpal", "dep:opus", "dep:bytes"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["bevy_log", "std"] }
@@ -26,13 +29,19 @@ tracing = "0.1"
 thiserror = "2"
 data-encoding = "2"
 anyhow = "1"
+bytes = { version = "1", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+cpal = { version = "0.18", optional = true }
+opus = { version = "0.4", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros"] }
 web-time = "1"
+
+[package.metadata.docs.rs]
+features = ["media"]
 
 [dev-dependencies]
 bevy = { version = "0.19", features = ["wayland", "x11"] }
@@ -41,3 +50,11 @@ rand = "0.10"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[[example]]
+name = "conference"
+required-features = ["media"]
+
+[[test]]
+name = "voice"
+required-features = ["media"]

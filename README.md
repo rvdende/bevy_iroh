@@ -57,12 +57,30 @@ under a hashed kind, so a peer on an older build steps over what it does not kno
 working. Received data is treated as hostile: sizes are capped, unknown kinds are logged, and a
 codec's `verify` runs before its `decode`.
 
+## Voice: the `media` feature
+
+```toml
+bevy_iroh = { version = "0.2", features = ["media"] }
+```
+
+Put `Voice` on a shared entity and your microphone goes to everyone in the room. A remote
+entity that arrives with `Voice` is played back from where it is, relative to the camera that
+carries `AudioListener`. `VoiceLevel` on both is a meter; `Voice::muted` is replicated so peers
+can show it. Frames are 20 ms opus over QUIC datagrams on the same endpoint, with a jitter
+buffer per track and concealment for what gossip would have retransmitted too late. Devices
+are the defaults unless you insert a `MediaSettings` first; its `AudioSource` and `AudioOutput`
+traits are how a test feeds a tone in and reads the mix out (`tests/voice.rs`). Pulls in cpal
+and libopus, built with cmake. Headphones: there is no echo cancellation.
+
+`cargo run --example conference --features media` is a room of spheres that swell when their
+owners speak.
+
 ## Status
 
-Rooms, presence, replication, messages and the example work, with a two-app integration test
-over real iroh (`cargo test`). Planned next, as features of this crate: `media` (voice and
-camera feeds over the same endpoint), `v4l2` (a `bevy_v4l2` camera as a source) and `wasm`
-(browser peers). See `PLAN.md`.
+Rooms, presence, replication, messages and voice work, each with a two-app integration test
+over real iroh (`cargo test --features media`). Planned next, as features of this crate:
+video feeds (`media`), a `bevy_v4l2` camera as a source (`v4l2`) and browser peers (`wasm`).
+See `PLAN.md`.
 
 ## License
 

@@ -2,8 +2,9 @@
 
 **Status (2026-09-08):** M1–M3 built and pushed to github.com/rvdende/bevy_iroh: node, rooms,
 presence, replication with codecs, typed messages, the cube example, and the two-app test.
-M4 polish is partly done (docs, README). Media (M5–M7) is next, with the MoQ session adapter
-copied in-tree so nothing depends on iroh-live.
+0.1.0 is on crates.io. M5 voice is built: the `media` feature, opus over QUIC datagrams on a
+`bevy_iroh/media/1` ALPN of our own rather than the MoQ stack, so nothing depends on iroh-live
+or on any git crate. M6 video and M7 browser are next.
 
 A Bevy plugin that makes entities shareable between peers over [iroh](https://iroh.computer):
 QUIC dialled by public key, hole punching with relay fallback, gossip for the group, direct
