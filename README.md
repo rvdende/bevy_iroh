@@ -60,7 +60,7 @@ codec's `verify` runs before its `decode`.
 ## Voice and video: the `media` feature
 
 ```toml
-bevy_iroh = { version = "0.3", features = ["ui"] }   # ui = media + ready-made Bevy UI
+bevy_iroh = { version = "0.4", features = ["ui", "webrtc"] }   # ui = media + Bevy UI; webrtc = direct to browsers
 ```
 
 Put `Voice` on a shared entity and your microphone goes to everyone in the room. A remote
