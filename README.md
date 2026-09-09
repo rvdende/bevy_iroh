@@ -5,6 +5,12 @@
 [![ci](https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml/badge.svg)](https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml)
 [![pages](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml/badge.svg)](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml)
 
+```sh
+cargo add bevy_iroh                                  # rooms, presence, replication, messages
+cargo add bevy_iroh --features ui,webrtc             # plus voice, video, the panel, and direct links to browsers
+cargo add bevy_iroh --features ui,webrtc,v4l2        # plus cameras on Linux
+```
+
 Live demos, in a browser tab: [rvdende.github.io/bevy_iroh](https://rvdende.github.io/bevy_iroh/).
 Code and issues: [github.com/rvdende/bevy_iroh](https://github.com/rvdende/bevy_iroh).
 
