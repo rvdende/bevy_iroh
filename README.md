@@ -126,11 +126,27 @@ your own project. `tests/wasm.rs` runs two apps in one page against the real rel
 `wasm-bindgen-test` (`cargo test --profile wasm-test --target wasm32-unknown-unknown
 --features wasm --test wasm` with geckodriver or chromedriver on `PATH`).
 
+## Browsers without the relay: the `webrtc` feature
+
+A page cannot accept a QUIC connection, so on its own it reaches every peer through a relay,
+and from far away that is most of the latency in a call. With `features = ["webrtc"]` a page
+offers a WebRTC connection to every peer it sees and a desktop answers: two data channels,
+one unreliable and unordered for the voice frames and one reliable for video and control,
+carrying the same bytes the QUIC path carries. The browser's own ICE does the hole punching;
+`str0m` is the desktop side, on the iroh runtime, with a STUN binding for the public address.
+Signalling is one typed message over the room, so there is no extra server. When the link is
+up, media to and from that peer moves onto it; when it drops, media moves back to QUIC, and
+the page offers again. `MediaPath` on each `Peer` and remote media entity says which path is
+in use, and `RtcSettings` holds the STUN servers and whether this node offers. Desktops do not
+offer to desktops by default, since a QUIC dial already hole punches; the two-app test turns
+that on to exercise the path locally.
+
 ## Status
 
 Rooms, presence, replication, messages, voice and video work, each with a two-app integration
-test over real iroh (`cargo test --features media`); a browser peer joins a native host and
-hears and sees it. Next: substrate moving onto this crate. See `PLAN.md`.
+test over real iroh (`cargo test --features media,webrtc`); a browser peer joins a native host
+and hears and sees it, over a relay or hole-punched through WebRTC. Next: substrate moving
+onto this crate. See `PLAN.md`.
 
 ## License
 

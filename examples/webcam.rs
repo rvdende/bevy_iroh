@@ -187,11 +187,21 @@ fn ticket() -> Option<RoomTicket> {
 
 /// In a page there is no terminal: the tab title says what the room is doing.
 #[cfg(target_arch = "wasm32")]
-fn page_title(rooms: Query<(&Room, &RoomStatus)>, peers: Query<&Peer>) {
+fn page_title(rooms: Query<(&Room, &RoomStatus)>, peers: Query<(&Peer, Option<&MediaPath>)>) {
     let Ok((room, status)) = rooms.single() else {
         return;
     };
-    let title = format!("{} {:?} peers={}", room.name, status, peers.iter().count());
+    let direct = peers
+        .iter()
+        .filter(|(_, p)| matches!(p, Some(MediaPath::WebRtc)))
+        .count();
+    let title = format!(
+        "{} {:?} peers={} webrtc={}",
+        room.name,
+        status,
+        peers.iter().count(),
+        direct
+    );
     if let Some(document) = web_sys::window().and_then(|w| w.document())
         && document.title() != title
     {

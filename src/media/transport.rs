@@ -1,4 +1,4 @@
-//! Media frames over the same endpoint, on their own ALPN.
+//! Media frames over the same endpoint, on their own ALPN, or over a WebRTC data channel.
 //!
 //! A subscriber dials the owner of a track and opens one control stream on which it names the
 //! tracks it wants. Audio then flows back as QUIC datagrams: unreliable and unordered, which is
@@ -6,6 +6,11 @@
 //! hearing. Video is one QUIC stream per group of pictures, newer groups at higher priority.
 //! Nothing here touches gossip; the announce that a track exists is the replicated component
 //! on the entity, and the track id is that entity's `NetId`.
+//!
+//! A browser cannot be dialled over QUIC, so a peer may also be reached through a [`Link`]
+//! made of two WebRTC data channels (the `webrtc` feature): the same bytes, audio on an
+//! unreliable unordered channel, video and control on a reliable one. When such a link comes
+//! up for a peer, subscriptions move onto it; when it goes, they move back.
 
 use std::{
     collections::HashMap,
@@ -37,6 +42,8 @@ const TAG_VIDEO: u8 = 2;
 const HEADER: usize = 1 + 8 + 4;
 /// The largest encoded video frame accepted: a hostile length prefix must not allocate more.
 const MAX_VIDEO_FRAME: usize = 8 << 20;
+/// tag (1) + track (8) + group (4) + keyframe (1) + pts (8): a video frame on a data channel.
+const VIDEO_MESSAGE_HEADER: usize = 1 + 8 + 4 + 1 + 8;
 
 /// What a track carries, so a subscription knows what to build for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,13 +66,85 @@ enum Control {
     },
 }
 
+/// The first byte of a WebRTC message carrying a control frame.
+const TAG_CONTROL: u8 = 3;
+
+/// What goes out on a WebRTC link.
+pub enum Outbound {
+    /// On the unreliable channel.
+    Audio(Bytes),
+    /// On the reliable channel.
+    Video(Bytes),
+    Control(Bytes),
+}
+
+/// A WebRTC data-channel pair to one peer. `out` hands bytes to whatever drives the
+/// connection: a `str0m` task on a desktop, `RTCDataChannel`s in a page. It answers `false`
+/// when the link is gone or too far behind to take more.
+pub struct RtcLink {
+    pub id: u64,
+    pub peer: EndpointId,
+    out: Box<dyn Fn(Outbound) -> bool + Send + Sync>,
+    alive: AtomicBool,
+}
+
+impl RtcLink {
+    pub fn new(peer: EndpointId, out: impl Fn(Outbound) -> bool + Send + Sync + 'static) -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        // High bit set: never collides with a QUIC connection's stable id.
+        let id = (1u64 << 63) | NEXT.fetch_add(1, Ordering::Relaxed) as u64;
+        Self {
+            id,
+            peer,
+            out: Box::new(out),
+            alive: AtomicBool::new(true),
+        }
+    }
+
+    pub fn send(&self, message: Outbound) -> bool {
+        self.alive.load(Ordering::Relaxed) && (self.out)(message)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Debug for RtcLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RtcLink({:x} to {})", self.id, self.peer.fmt_short())
+    }
+}
+
+/// A way to reach one peer with media.
+#[derive(Clone, Debug)]
+pub enum Link {
+    Quic(Connection),
+    Rtc(Arc<RtcLink>),
+}
+
+impl Link {
+    pub fn id(&self) -> u64 {
+        match self {
+            Link::Quic(c) => c.stable_id() as u64,
+            Link::Rtc(l) => l.id,
+        }
+    }
+
+    pub fn is_rtc(&self) -> bool {
+        matches!(self, Link::Rtc(_))
+    }
+}
+
 /// State shared by the Bevy side, the protocol handler, the audio threads and the sessions.
 #[derive(Default)]
 pub struct MediaHub {
     /// Tracks this node publishes, and whether they are muted.
     published: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     /// Who subscribed to each of my tracks.
-    subscribers: Mutex<HashMap<u64, Vec<Connection>>>,
+    subscribers: Mutex<HashMap<u64, Vec<Link>>>,
+    /// WebRTC links that are up, by peer.
+    rtc_links: Mutex<HashMap<EndpointId, Arc<RtcLink>>>,
     /// Audio tracks I subscribe to, by id: where their frames land.
     remote: Mutex<HashMap<u64, Arc<RemoteTrack>>>,
     /// Video tracks I subscribe to.
@@ -79,9 +158,36 @@ pub struct MediaHub {
 }
 
 struct Session {
-    conn: Connection,
-    control: SendStream,
+    link: Link,
+    /// The control stream, on a QUIC session.
+    control: Option<SendStream>,
     tracks: Vec<u64>,
+}
+
+impl Session {
+    async fn control(&mut self, control: &Control) -> anyhow::Result<()> {
+        match &self.link {
+            Link::Quic(_) => {
+                let stream = self
+                    .control
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("no control stream"))?;
+                write_control(stream, control).await
+            }
+            Link::Rtc(link) => {
+                let mut body = vec![TAG_CONTROL];
+                body.extend(postcard::to_stdvec(control)?);
+                anyhow::ensure!(link.send(Outbound::Control(Bytes::from(body))), "link gone");
+                Ok(())
+            }
+        }
+    }
+
+    fn close(self) {
+        if let Link::Quic(conn) = self.link {
+            conn.close(0u32.into(), b"done");
+        }
+    }
 }
 
 impl std::fmt::Debug for MediaHub {
@@ -120,8 +226,8 @@ impl MediaHub {
             .clone()
     }
 
-    /// The connections currently subscribed to `track`, for a video group to be opened on.
-    pub(crate) fn subscribers_of(&self, track: u64) -> Vec<Connection> {
+    /// The links currently subscribed to `track`, for a video group to be opened on.
+    pub(crate) fn subscribers_of(&self, track: u64) -> Vec<Link> {
         lock(&self.subscribers)
             .get(&track)
             .cloned()
@@ -152,11 +258,141 @@ impl MediaHub {
         buf.extend_from_slice(&seq.to_le_bytes());
         buf.extend_from_slice(frame);
         let bytes = Bytes::from(buf);
-        conns.retain(|conn| match conn.send_datagram(bytes.clone()) {
-            Ok(()) => true,
-            Err(iroh::endpoint::SendDatagramError::ConnectionLost(_)) => false,
-            Err(_) => true,
+        conns.retain(|link| match link {
+            Link::Quic(conn) => match conn.send_datagram(bytes.clone()) {
+                Ok(()) => true,
+                Err(iroh::endpoint::SendDatagramError::ConnectionLost(_)) => false,
+                Err(_) => true,
+            },
+            Link::Rtc(link) => {
+                link.send(Outbound::Audio(bytes.clone()));
+                link.is_alive()
+            }
         });
+    }
+
+    // -- WebRTC links -----------------------------------------------------------------------
+
+    /// The WebRTC link to `peer`, if one is up.
+    pub fn rtc_link(&self, peer: EndpointId) -> Option<Arc<RtcLink>> {
+        lock(&self.rtc_links).get(&peer).cloned()
+    }
+
+    /// Whether `peer` is reached over WebRTC right now.
+    pub fn is_rtc(&self, peer: EndpointId) -> bool {
+        lock(&self.rtc_links).contains_key(&peer)
+    }
+
+    /// A WebRTC link came up. Anything subscribed from that peer over QUIC is dropped and
+    /// marked for subscribing again, which lands on the link.
+    pub async fn add_rtc_link(self: &Arc<Self>, link: Arc<RtcLink>) {
+        let peer = link.peer;
+        if let Some(old) = lock(&self.rtc_links).insert(peer, link) {
+            old.alive.store(false, Ordering::Relaxed);
+        }
+        if let Some(session) = self.sessions.lock().await.remove(&peer) {
+            session.close();
+        }
+        lock(&self.dead).push(peer);
+        tracing::info!("bevy_iroh: webrtc to {} is up", peer.fmt_short());
+    }
+
+    /// A WebRTC link went. Subscriptions over it are marked for subscribing again, which
+    /// dials QUIC.
+    pub async fn remove_rtc_link(self: &Arc<Self>, link_id: u64) {
+        let peer = {
+            let mut links = lock(&self.rtc_links);
+            let Some((peer, _)) = links
+                .iter()
+                .find(|(_, l)| l.id == link_id)
+                .map(|(p, l)| (*p, l.clone()))
+            else {
+                return;
+            };
+            if let Some(l) = links.remove(&peer) {
+                l.alive.store(false, Ordering::Relaxed);
+            }
+            peer
+        };
+        for links in lock(&self.subscribers).values_mut() {
+            links.retain(|l| l.id() != link_id);
+        }
+        let mut sessions = self.sessions.lock().await;
+        if sessions.get(&peer).is_some_and(|s| s.link.id() == link_id) {
+            sessions.remove(&peer);
+        }
+        drop(sessions);
+        lock(&self.dead).push(peer);
+        tracing::info!("bevy_iroh: webrtc to {} is down", peer.fmt_short());
+    }
+
+    /// One message that arrived on a WebRTC link, on either channel.
+    pub fn rtc_receive(&self, link: &Arc<RtcLink>, data: &[u8]) {
+        match data.first() {
+            Some(&TAG_AUDIO) if data.len() >= HEADER => {
+                let track = u64::from_le_bytes(data[1..9].try_into().expect("8 bytes"));
+                let seq = u32::from_le_bytes(data[9..13].try_into().expect("4 bytes"));
+                if let Some(remote) = self.remote(track) {
+                    remote.push(seq, Bytes::copy_from_slice(&data[HEADER..]));
+                }
+            }
+            Some(&TAG_VIDEO) if data.len() >= VIDEO_MESSAGE_HEADER => {
+                let track = u64::from_le_bytes(data[1..9].try_into().expect("8 bytes"));
+                let group = u32::from_le_bytes(data[9..13].try_into().expect("4 bytes"));
+                let keyframe = data[13] & 1 != 0;
+                let pts_ms = u64::from_le_bytes(data[14..22].try_into().expect("8 bytes"));
+                if let Some(remote) = self.remote_video(track) {
+                    remote.push(VideoPacket {
+                        group,
+                        keyframe,
+                        pts_ms,
+                        data: data[VIDEO_MESSAGE_HEADER..].to_vec(),
+                    });
+                }
+            }
+            Some(&TAG_CONTROL) => {
+                let Ok(control) = postcard::from_bytes::<Control>(&data[1..]) else {
+                    return;
+                };
+                self.control(Link::Rtc(link.clone()), control);
+            }
+            _ => {}
+        }
+    }
+
+    /// One video frame as a single reliable-channel message.
+    pub(crate) fn video_message(track: u64, packet: &VideoPacket) -> Bytes {
+        let mut buf = Vec::with_capacity(VIDEO_MESSAGE_HEADER + packet.data.len());
+        buf.push(TAG_VIDEO);
+        buf.extend_from_slice(&track.to_le_bytes());
+        buf.extend_from_slice(&packet.group.to_le_bytes());
+        buf.push(packet.keyframe as u8);
+        buf.extend_from_slice(&packet.pts_ms.to_le_bytes());
+        buf.extend_from_slice(&packet.data);
+        Bytes::from(buf)
+    }
+
+    /// A control frame from a subscriber, over either transport.
+    fn control(&self, link: Link, control: Control) {
+        let id = link.id();
+        match control {
+            Control::Subscribe { track } => {
+                let mut subs = lock(&self.subscribers);
+                let links = subs.entry(track).or_default();
+                if !links.iter().any(|l| l.id() == id) {
+                    links.push(link);
+                }
+                drop(subs);
+                // A video subscriber can decode nothing until a keyframe.
+                self.want_keyframe(track);
+            }
+            Control::Unsubscribe { track } => {
+                if let Some(links) = lock(&self.subscribers).get_mut(&track) {
+                    links.retain(|l| l.id() != id);
+                }
+            }
+            Control::Keyframe { track } => self.want_keyframe(track),
+        }
     }
 
     // -- subscribing ------------------------------------------------------------------------
@@ -214,31 +450,43 @@ impl MediaHub {
         }
         let mut sessions = self.sessions.lock().await;
         if !sessions.contains_key(&owner) {
-            let conn = endpoint.connect(EndpointAddr::new(owner), ALPN).await?;
-            let (control, _recv) = conn.open_bi().await?;
-            let hub = self.clone();
-            let reader = conn.clone();
-            n0_future::task::spawn(async move {
-                hub.read_datagrams(reader).await;
-                hub.sessions.lock().await.remove(&owner);
-                lock(&hub.dead).push(owner);
-            });
-            let hub = self.clone();
-            let streams = conn.clone();
-            n0_future::task::spawn(async move { hub.read_streams(streams).await });
-            sessions.insert(
-                owner,
-                Session {
-                    conn,
-                    control,
+            let session = match self.rtc_link(owner) {
+                Some(link) => Session {
+                    link: Link::Rtc(link),
+                    control: None,
                     tracks: Vec::new(),
                 },
-            );
+                None => {
+                    let conn = endpoint.connect(EndpointAddr::new(owner), ALPN).await?;
+                    let (control, _recv) = conn.open_bi().await?;
+                    let hub = self.clone();
+                    let reader = conn.clone();
+                    let id = conn.stable_id() as u64;
+                    n0_future::task::spawn(async move {
+                        hub.read_datagrams(reader).await;
+                        let mut sessions = hub.sessions.lock().await;
+                        if sessions.get(&owner).is_some_and(|s| s.link.id() == id) {
+                            sessions.remove(&owner);
+                        }
+                        drop(sessions);
+                        lock(&hub.dead).push(owner);
+                    });
+                    let hub = self.clone();
+                    let streams = conn.clone();
+                    n0_future::task::spawn(async move { hub.read_streams(streams).await });
+                    Session {
+                        link: Link::Quic(conn),
+                        control: Some(control),
+                        tracks: Vec::new(),
+                    }
+                }
+            };
+            sessions.insert(owner, session);
         }
         let session = sessions.get_mut(&owner).expect("just inserted");
         if !session.tracks.contains(&track) {
             session.tracks.push(track);
-            write_control(&mut session.control, &Control::Subscribe { track }).await?;
+            session.control(&Control::Subscribe { track }).await?;
         }
         Ok(())
     }
@@ -251,10 +499,10 @@ impl MediaHub {
             return;
         };
         session.tracks.retain(|t| *t != track);
-        let _ = write_control(&mut session.control, &Control::Unsubscribe { track }).await;
+        let _ = session.control(&Control::Unsubscribe { track }).await;
         if session.tracks.is_empty() {
             let session = sessions.remove(&owner).expect("present");
-            session.conn.close(0u32.into(), b"done");
+            session.close();
         }
     }
 
@@ -262,7 +510,7 @@ impl MediaHub {
     pub async fn request_keyframe(self: &Arc<Self>, owner: EndpointId, track: u64) {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.get_mut(&owner) {
-            let _ = write_control(&mut session.control, &Control::Keyframe { track }).await;
+            let _ = session.control(&Control::Keyframe { track }).await;
         }
     }
 
@@ -379,32 +627,15 @@ impl MediaHub {
         let Ok((_send, mut recv)) = conn.accept_bi().await else {
             return;
         };
-        let id = conn.stable_id();
+        let id = conn.stable_id() as u64;
         loop {
             let Ok(control) = read_control(&mut recv).await else {
                 break;
             };
-            match control {
-                Control::Subscribe { track } => {
-                    let mut subs = lock(&self.subscribers);
-                    let conns = subs.entry(track).or_default();
-                    if !conns.iter().any(|c| c.stable_id() == id) {
-                        conns.push(conn.clone());
-                    }
-                    drop(subs);
-                    // A video subscriber can decode nothing until a keyframe.
-                    self.want_keyframe(track);
-                }
-                Control::Unsubscribe { track } => {
-                    if let Some(conns) = lock(&self.subscribers).get_mut(&track) {
-                        conns.retain(|c| c.stable_id() != id);
-                    }
-                }
-                Control::Keyframe { track } => self.want_keyframe(track),
-            }
+            self.control(Link::Quic(conn.clone()), control);
         }
-        for conns in lock(&self.subscribers).values_mut() {
-            conns.retain(|c| c.stable_id() != id);
+        for links in lock(&self.subscribers).values_mut() {
+            links.retain(|l| l.id() != id);
         }
     }
 

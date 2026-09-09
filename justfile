@@ -16,11 +16,11 @@ cube *ticket:
 
 # Voice: spheres with a bar over each head, mute and device pickers top right.
 voice *ticket:
-    cargo run --example voice --features ui -- "$@"
+    cargo run --example voice --features ui,webrtc -- "$@"
 
 # Voice and a camera: the same, with everyone's picture over their sphere.
 webcam *ticket:
-    cargo run --example webcam --features ui{{v4l2}} -- "$@"
+    cargo run --example webcam --features ui,webrtc{{v4l2}} -- "$@"
 
 # A headless peer that keeps a room alive with an orbiting cube, for browser testing.
 host *ticket:
@@ -42,9 +42,9 @@ web-webcam port="8000":
 # Everything that is checked before a commit.
 check:
     cargo fmt --all -- --check
-    cargo clippy --features ui{{v4l2}} --all-targets -- -D warnings
-    cargo test --features ui{{v4l2}}
-    cargo check --target wasm32-unknown-unknown --features ui,wasm --examples
+    cargo clippy --features ui,webrtc{{v4l2}} --all-targets -- -D warnings
+    cargo test --features ui,webrtc{{v4l2}}
+    cargo check --target wasm32-unknown-unknown --features ui,wasm,webrtc --examples
 
 # The browser transport test, in a headless browser (geckodriver or chromedriver on PATH).
 test-wasm:

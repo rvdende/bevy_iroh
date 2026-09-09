@@ -13,7 +13,7 @@ use std::sync::{
 
 use bevy::platform::time::Instant;
 
-use super::transport::MediaHub;
+use super::transport::{Link, MediaHub, Outbound};
 
 /// One frame from a [`VideoSource`].
 pub struct VideoFrame {
@@ -385,20 +385,20 @@ pub(crate) async fn run_publisher(
         /// next keyframe.
         broken: Arc<AtomicBool>,
     }
-    let mut feeds: HashMap<usize, Feed> = HashMap::new();
+    let mut feeds: HashMap<u64, Feed> = HashMap::new();
     let keyframe_wanted = hub.keyframe_flag(track);
     while let Some(packet) = packets.recv().await {
         if packet.keyframe {
             let subscribers = hub.subscribers_of(track);
-            feeds.retain(|id, _| subscribers.iter().any(|c| c.stable_id() == *id));
-            for conn in subscribers {
-                let id = conn.stable_id();
+            feeds.retain(|id, _| subscribers.iter().any(|l| l.id() == *id));
+            for link in subscribers {
+                let id = link.id();
                 if feeds.contains_key(&id) {
                     continue;
                 }
                 let (tx, rx) = tokio::sync::mpsc::channel(SUBSCRIBER_QUEUE);
                 let broken = Arc::new(AtomicBool::new(false));
-                n0_future::task::spawn(serve_subscriber(conn, track, rx, broken.clone()));
+                n0_future::task::spawn(serve_subscriber(link, track, rx, broken.clone()));
                 feeds.insert(id, Feed { tx, broken });
             }
             tracing::debug!(
@@ -427,6 +427,35 @@ pub(crate) async fn run_publisher(
 }
 
 async fn serve_subscriber(
+    link: Link,
+    track: u64,
+    mut packets: tokio::sync::mpsc::Receiver<Arc<VideoPacket>>,
+    broken: Arc<AtomicBool>,
+) {
+    match link {
+        Link::Quic(conn) => serve_quic(conn, track, packets, broken).await,
+        Link::Rtc(link) => {
+            // One reliable channel: a frame is a message, and a hole in a group means
+            // waiting for the next keyframe. A link that will not take a frame is behind
+            // by more than a group's worth, and a fresh task starts it at the next keyframe.
+            let mut skipping = false;
+            while let Some(packet) = packets.recv().await {
+                if packet.keyframe {
+                    skipping = false;
+                    broken.store(false, Ordering::Relaxed);
+                } else if skipping || broken.load(Ordering::Relaxed) {
+                    skipping = true;
+                    continue;
+                }
+                if !link.send(Outbound::Video(MediaHub::video_message(track, &packet))) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn serve_quic(
     conn: iroh::endpoint::Connection,
     track: u64,
     mut packets: tokio::sync::mpsc::Receiver<Arc<VideoPacket>>,

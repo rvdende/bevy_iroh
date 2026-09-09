@@ -40,6 +40,8 @@ pub mod prelude {
         MediaSettings, MicLevel, MicrophoneChoice, SpeakerChoice, TestPattern, VideoFeed,
         VideoFeedStats, VideoImage, VideoInput, VideoStats, Voice, VoiceLevel, VoiceStats,
     };
+    #[cfg(feature = "webrtc")]
+    pub use crate::media::{MediaPath, RtcSettings};
     pub use crate::{
         Identity, Iroh, IrohPlugin, IrohSet, Link, NetStats, Relays, RoomTicket, Stats, Via,
         message::{MessageAppExt, NetSender, Received},

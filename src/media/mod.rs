@@ -16,6 +16,8 @@ pub mod audio;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+#[cfg(feature = "webrtc")]
+pub mod rtc;
 pub mod transport;
 #[cfg(feature = "ui")]
 pub mod ui;
@@ -37,7 +39,9 @@ pub use audio::{AudioOutput, AudioSource, Mixer, RemoteTrack, Running, VoiceDeco
 pub use devices::{AudioDevice, AudioDevices, CameraDevice, CameraDevices, Permission};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{Microphone, Speaker};
-pub use transport::{ALPN, MediaHub, TrackKind};
+#[cfg(feature = "webrtc")]
+pub use rtc::{MediaPath, RtcSettings, RtcSignal};
+pub use transport::{ALPN, Link, MediaHub, RtcLink, TrackKind};
 pub use video::{
     FeedStats, Pixels, RemoteVideo, RgbaFrame, TestPattern, VideoConfig, VideoFrame, VideoSource,
     VideoTrackStats,
@@ -507,6 +511,8 @@ impl Plugin for MediaPlugin {
             .add_observer(on_video_removed);
         #[cfg(target_arch = "wasm32")]
         app.add_systems(Update, (devices::poll_web_devices, web::sweep));
+        #[cfg(feature = "webrtc")]
+        app.add_plugins(rtc::RtcPlugin);
     }
 }
 

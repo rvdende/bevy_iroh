@@ -43,6 +43,9 @@ ui = [
 ]
 ## Cameras through `bevy_v4l2`: `VideoInput::camera()` opens the one in `MediaSettings`. Linux.
 v4l2 = ["media", "dep:bevy_v4l2"]
+## Media to and from browsers over WebRTC data channels, hole-punched, instead of through a
+## relay: `str0m` on a desktop, `RTCPeerConnection` in a page. Signalling rides the room.
+webrtc = ["media", "dep:str0m"]
 ## What only a browser has: an identity in localStorage and the ticket from the page URL. The
 ## core transport runs on wasm32 without this.
 wasm = ["dep:web-sys", "dep:wasm-bindgen"]
@@ -67,6 +70,7 @@ cpal = { version = "0.18", optional = true }
 opus = { version = "0.4", optional = true }
 openh264 = { version = "0.9.8", optional = true }
 bevy_v4l2 = { version = "0.3", optional = true, default-features = false, features = ["mjpeg"] }
+str0m = { version = "0.23", optional = true, default-features = false, features = ["aws-lc-rs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros"] }
@@ -92,10 +96,15 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioDecoderConfig", "AudioDecoderInit", "AudioData", "AudioDataInit",
     "AudioDataCopyToOptions", "AudioSampleFormat", "EncodedAudioChunk", "EncodedAudioChunkInit",
     "EncodedAudioChunkType",
+    "RtcPeerConnection", "RtcConfiguration", "RtcIceServer", "RtcDataChannel",
+    "RtcDataChannelInit", "RtcDataChannelEvent", "RtcDataChannelType", "RtcDataChannelState",
+    "RtcSessionDescription", "RtcSessionDescriptionInit", "RtcSdpType", "RtcIceCandidate",
+    "RtcIceCandidateInit", "RtcPeerConnectionIceEvent", "RtcIceConnectionState",
+    "RtcPeerConnectionState", "MessageEvent",
 ] }
 
 [package.metadata.docs.rs]
-features = ["media", "ui", "v4l2"]
+features = ["media", "ui", "v4l2", "webrtc"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The cube example puts the room's status in the tab title; the wasm test logs to the console.
@@ -126,6 +135,10 @@ required-features = ["media"]
 [[test]]
 name = "video"
 required-features = ["media"]
+
+[[test]]
+name = "webrtc"
+required-features = ["webrtc"]
 
 # Until bevy_v4l2 0.3 is on crates.io. Stripped from the published manifest.
 [patch.crates-io]
