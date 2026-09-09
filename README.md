@@ -94,6 +94,9 @@ cargo run --example webcam --features ui,v4l2           # the same, plus a camer
 ./scripts/web.sh voice                                  # the same, in a browser tab
 ```
 
+Or with [just](https://just.systems): `just voice`, `just webcam <ticket>`, `just web webcam`,
+and `just check` for everything a commit needs. `just` alone lists them.
+
 The buffering is the part that decides whether a call is usable, and it follows what
 substrate learned on real calls: capture and playback buffers of 512 frames (11 ms) where the
 device allows; a 60 ms jitter target that doubles on an underrun (after a one-second grace)
