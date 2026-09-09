@@ -30,7 +30,7 @@ fn main() {
         .replicate::<Avatar>()
         .add_systems(Startup, setup)
         .add_systems(Update, (drive, print_ticket, announce, page_title))
-        .add_observer(dress)
+        .add_observer(on_add_avatar)
         .run();
 }
 
@@ -76,7 +76,7 @@ fn setup(
 }
 
 /// Runs for my avatar and for every avatar a peer sends me.
-fn dress(
+fn on_add_avatar(
     add: On<Add, Avatar>,
     avatars: Query<&Avatar>,
     mut commands: Commands,

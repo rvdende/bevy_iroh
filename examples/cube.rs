@@ -31,7 +31,7 @@ fn main() {
         .replicate::<Cube>()
         .add_systems(Startup, setup)
         .add_systems(Update, (drive, print_ticket, announce_peers, page_title))
-        .add_observer(dress_cube)
+        .add_observer(on_add_cube)
         .run();
 }
 
@@ -94,7 +94,7 @@ fn setup(
 }
 
 /// Runs for my cube and for every cube a peer sends: one code path for visuals.
-fn dress_cube(
+fn on_add_cube(
     add: On<Add, Cube>,
     cubes: Query<&Cube>,
     mut commands: Commands,

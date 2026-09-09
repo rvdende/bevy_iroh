@@ -31,7 +31,7 @@ fn main() {
         .add_plugins((DefaultPlugins, IrohPlugin::default()))
         .replicate::<Cube>()             // Transform is replicated by default
         .add_systems(Startup, setup)
-        .add_observer(dress_cube)
+        .add_observer(on_add_cube)
         .run();
 }
 
@@ -45,7 +45,7 @@ fn setup(mut commands: Commands) {
 }
 
 // Runs for my cube and for every cube a peer sends: one code path for visuals.
-fn dress_cube(add: On<Add, Cube>, mut commands: Commands /* , meshes, materials */) {
+fn on_add_cube(add: On<Add, Cube>, mut commands: Commands /* , meshes, materials */) {
     commands.entity(add.entity).insert((/* Mesh3d, MeshMaterial3d */));
 }
 ```

@@ -43,7 +43,7 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(Update, (drive, print_ticket, announce, screens, page_title))
         .add_systems(Update, (compose, receive_chat, bubbles, chat_ui).chain())
-        .add_observer(dress)
+        .add_observer(on_add_avatar)
         .run();
 }
 
@@ -90,7 +90,7 @@ fn setup(
     ));
 }
 
-fn dress(
+fn on_add_avatar(
     add: On<Add, Avatar>,
     avatars: Query<&Avatar>,
     mut commands: Commands,

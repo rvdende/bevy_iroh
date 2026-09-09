@@ -37,7 +37,7 @@ fn main() {
         .replicate::<Cube>()                   // Transform is replicated by default
         .add_systems(Startup, setup)
         .add_systems(Update, (drive, print_ticket))
-        .add_observer(dress_cube)
+        .add_observer(on_add_cube)
         .run();
 }
 
@@ -51,7 +51,7 @@ fn setup(mut commands: Commands) {
 }
 
 // Runs for my cube and for every cube a peer sends me: one code path for visuals.
-fn dress_cube(add: On<Add, Cube>, mut commands: Commands, /* meshes, materials */) {
+fn on_add_cube(add: On<Add, Cube>, mut commands: Commands, /* meshes, materials */) {
     commands.entity(add.entity).insert((Mesh3d(..), MeshMaterial3d(..)));
 }
 
@@ -203,7 +203,7 @@ How the cases land:
 | plain data | `#[derive(Component, Serialize, Deserialize, Clone)]` + `replicate::<T>()` |
 | custom wire form, validation, subset of fields | a codec struct; config lives on the instance |
 | a third‑party component | a codec whose `Source` is that component |
-| asset‑backed visuals | keep them local; replicate a `Prefab` description and dress it in `On<Add, Prefab>` (recommended). Or encode through `Assets` in `EncodeCx` and load in `DecodeCx` |
+| asset‑backed visuals | keep them local; replicate a `Prefab` description and give it visuals in `On<Add, Prefab>` (recommended). Or encode through `Assets` in `EncodeCx` and load in `DecodeCx` |
 | entity references | map through the context; `ChildOf` ships as a built‑in codec doing exactly this |
 | smoothing / reconcile on receive | `Target != Source`: the built‑in transform codec targets `Glide`, a system eases `Transform` toward it |
 | substrate's kinds | one codec with `Source = Body { kind, bytes }`, kind dispatch inside it |
