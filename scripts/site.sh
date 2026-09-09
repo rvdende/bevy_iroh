@@ -20,7 +20,11 @@ for example in cube voice webcam; do
   wasm-bindgen --target web --no-typescript --out-dir "site/$example" --out-name app \
     "target/wasm32-unknown-unknown/$profile/examples/$example.wasm"
   if command -v wasm-opt >/dev/null 2>&1; then
-    wasm-opt -Oz --all-features -o "site/$example/app_bg.wasm" "site/$example/app_bg.wasm"
+    # The features rustc's wasm32-unknown-unknown target emits, and no more: `--all-features`
+    # let an old binaryen write value types browsers refuse.
+    wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-reference-types \
+      --enable-sign-ext --enable-mutable-globals --enable-multivalue \
+      -o "site/$example/app_bg.wasm" "site/$example/app_bg.wasm"
   fi
   sed "s/EXAMPLE/$example/g" web/demo.html > "site/$example/index.html"
   cp "examples/$example.rs" "site/$example/source.rs"
