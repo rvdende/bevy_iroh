@@ -5,7 +5,9 @@ openh264) and in a browser (Web Audio, WebCodecs, Annex B H.264 both ways), with
 choice through `MediaSettings` + `AudioDevices` / `CameraDevices`, a preview `VideoImage` on
 local feeds, per-subscriber video fan-out with a 150 ms catch-up rule, and the `ui` feature
 (`MediaPanel`, `VoiceIndicator`). `examples/voice.rs` and `examples/webcam.rs` replace
-`conference`. Substrate's voice buffering rules are in `media/audio.rs`; substrate migration is
+`conference`. The `webrtc` feature (branch `webrtc`) reaches browsers over hole-punched data
+channels instead of the relay: `str0m` natively, `RTCPeerConnection` in a page, signalling over
+the room; verified desktop to browser across two machines on a LAN. Substrate's voice buffering rules are in `media/audio.rs`; substrate migration is
 on robot2's `bevy-iroh` branch (`crates/substrate/MIGRATION.md`). Next: substrate onto
 bevy_iroh; echo cancellation on desktops; a hardware encoder path.
 

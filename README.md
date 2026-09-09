@@ -119,8 +119,10 @@ The core transport runs in a page as it is: iroh reaches the relays over WebSock
 `wasm` feature adds an identity kept in `localStorage` (`web::stored_identity`) and the ticket
 out of the address bar (`web::ticket_from_url("join")`). `scripts/web.sh [example]` builds an
 example for the browser and serves it; open `http://localhost:8000/?join=<ticket>` from a
-native `voice`, `webcam` or `host` run. Microphone and camera need https or localhost, and a
-browser lists them only after its permission prompt: "Devices" asks. WebCodecs is behind
+native `voice`, `webcam` or `host` run. A page needs a secure context, https or localhost,
+for its microphone and camera and for iroh's relay probes; `HTTPS=1 ./scripts/web.sh voice`
+serves a self-signed certificate for testing from another machine on the LAN. A browser lists
+devices only after its permission prompt: "Devices" asks. WebCodecs is behind
 web-sys's unstable cfg, which `.cargo/config.toml` sets for the wasm target; copy that into
 your own project. `tests/wasm.rs` runs two apps in one page against the real relay under
 `wasm-bindgen-test` (`cargo test --profile wasm-test --target wasm32-unknown-unknown
