@@ -22,7 +22,7 @@ use iroh_gossip::proto::TopicId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::net::{
-    self, Config, Kind, Node, Relays, RoomTicket, Topic,
+    self, Config, Kind, Node, Payload, Relays, RoomTicket, Topic,
     stats::{SAMPLE_EVERY, Sampler, Stats},
 };
 
@@ -45,6 +45,12 @@ pub enum Identity {
 }
 
 pub(crate) enum ToNet {
+    /// How to introduce ourselves, and how often. Sent once at startup and again whenever
+    /// the display name changes.
+    Presence {
+        name: String,
+        every: Duration,
+    },
     Host {
         room: RoomId,
         name: String,
@@ -337,6 +343,10 @@ impl Plugin for IrohPlugin {
         match spawn(config, self.display_name.clone()) {
             Ok(iroh) => {
                 info!("bevy_iroh: node {}", iroh.id().fmt_short());
+                iroh.send(ToNet::Presence {
+                    name: self.display_name.clone(),
+                    every: self.heartbeat,
+                });
                 app.insert_resource(iroh);
             }
             Err(why) => error!("bevy_iroh: {why}; networking is off"),
@@ -510,6 +520,11 @@ async fn run(
     let mut peers: Vec<(EndpointId, Option<String>)> = Vec::new();
     let mut sampler = Sampler::new();
     let mut sampled = n0_future::time::Instant::now();
+    // Heartbeats go out from here rather than from a Bevy system: a page whose tab is hidden
+    // stops running frames, and a peer that stops saying hello is reaped by everyone else.
+    // This loop keeps running on a throttled timer, which is enough.
+    let mut presence: Option<(String, Duration)> = None;
+    let mut last_hello = n0_future::time::Instant::now();
     let ctx = node.ctx();
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -520,11 +535,27 @@ async fn run(
             sampled = n0_future::time::Instant::now();
             let _ = out.send(FromNet::Stats(sampler.sample(&ctx, &peers)));
         }
+        if let Some((name, every)) = &presence
+            && last_hello.elapsed() >= *every
+        {
+            last_hello = n0_future::time::Instant::now();
+            if let Ok(body) = (net::proto::Hello { name: name.clone() }).to_body() {
+                for joined in topics.values() {
+                    if let Err(e) = joined.broadcast(Kind::HELLO, body.clone()).await {
+                        debug!("bevy_iroh: hello: {e:#}");
+                    }
+                }
+            }
+        }
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 if let ToNet::Peers(list) = command {
                     peers = list;
+                    continue;
+                }
+                if let ToNet::Presence { name, every } = command {
+                    presence = Some((name, every));
                     continue;
                 }
                 let room = match &command {
@@ -539,7 +570,7 @@ async fn run(
                 let Some(event) = event else { break };
                 let _ = out.send(FromNet::Event(event));
             }
-            // So a dropped resource is noticed by an otherwise idle loop.
+            // So a dropped resource, and a heartbeat due, are noticed by an otherwise idle loop.
             _ = n0_future::time::sleep(Duration::from_millis(200)) => {}
         }
     }
@@ -601,7 +632,7 @@ async fn apply(
                 .await
                 .map_err(|e| format!("{e:#}"))?;
         }
-        ToNet::Peers(_) => {}
+        ToNet::Peers(_) | ToNet::Presence { .. } => {}
         ToNet::SendTo {
             topic,
             to,

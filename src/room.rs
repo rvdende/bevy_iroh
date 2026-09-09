@@ -389,18 +389,18 @@ fn reap(
     }
 }
 
-/// Say hello on the clock, and sooner when a neighbour appears.
+/// Say hello ahead of the clock when a neighbour appears, and on the first frame in a room.
+/// The clock itself runs on the network thread (see `node::run`), so a page whose tab is
+/// hidden, and so runs no frames, keeps saying hello.
 fn presence_out(
     iroh: Option<Res<Iroh>>,
-    timing: Res<Timing>,
     time: Res<Time<Real>>,
     mut rooms: Query<(&RoomTopic, &mut Presence)>,
 ) {
     let Some(iroh) = iroh else { return };
     let now = time.elapsed_secs_f64();
-    let every = timing.heartbeat.as_secs_f64();
     for (topic, mut presence) in &mut rooms {
-        if presence.nudge || now - presence.last_hello >= every {
+        if presence.nudge || presence.last_hello < 0.0 {
             presence.nudge = false;
             presence.last_hello = now;
             let hello = Hello {

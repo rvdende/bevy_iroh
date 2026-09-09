@@ -253,7 +253,6 @@ fn window_plugin() -> WindowPlugin {
             primary_window: Some(Window {
                 canvas: Some("#bevy".into()),
                 fit_canvas_to_parent: true,
-                prevent_default_event_handling: false,
                 ..default()
             }),
             ..default()
@@ -373,6 +372,7 @@ fn receive_chat(
                 });
             }
         }
+        info!("{who}: {}", received.msg.0);
         if let Ok(log) = log.single() {
             log_line(&mut commands, log, &format!("{who}: {}", received.msg.0));
         }
@@ -411,7 +411,8 @@ fn bubbles(
                     border_radius: BorderRadius::all(Val::Px(6.0)),
                     ..default()
                 },
-                UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::Percent(-100.0))),
+                // Centred on the point, hanging down from it.
+                UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::ZERO)),
                 BackgroundColor(Color::srgba(0.08, 0.09, 0.11, 0.85)),
                 Text::new(said.text.clone()),
                 TextFont::from_font_size(14.0),
@@ -437,12 +438,15 @@ fn bubbles(
         let alpha = (1.0 - (age - BUBBLE_HOLD) / BUBBLE_FADE).clamp(0.0, 1.0) as f32;
         colour.0 = Color::WHITE.with_alpha(alpha);
         background.0 = Color::srgba(0.08, 0.09, 0.11, 0.85 * alpha);
-        // Over the head, above the picture.
-        let over = transform.translation() + Vec3::Y * 2.1;
+        // Just above the picture, and kept on screen for an avatar near the edge.
+        let over = transform.translation() + Vec3::Y * 2.0;
         match camera.world_to_viewport(camera_transform, over) {
             Ok(at) => {
-                node.left = Val::Px(at.x);
-                node.top = Val::Px(at.y);
+                let size = camera
+                    .logical_viewport_size()
+                    .unwrap_or(Vec2::splat(1000.0));
+                node.left = Val::Px(at.x.clamp(140.0, size.x - 140.0));
+                node.top = Val::Px(at.y.max(40.0));
                 node.display = Display::Flex;
             }
             Err(_) => node.display = Display::None,

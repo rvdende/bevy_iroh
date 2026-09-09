@@ -207,7 +207,6 @@ fn window_plugin() -> WindowPlugin {
             primary_window: Some(Window {
                 canvas: Some("#bevy".into()),
                 fit_canvas_to_parent: true,
-                prevent_default_event_handling: false,
                 ..default()
             }),
             ..default()
