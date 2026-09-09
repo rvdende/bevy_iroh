@@ -21,14 +21,24 @@
     .demo b { display: block; color: #6fd38a; margin-bottom: .3rem; }
     .demo small { color: #9a9ea6; }
     .note { color: #9a9ea6; font-size: .9em; }
+    .badges { display: flex; gap: .4rem; flex-wrap: wrap; margin: -.4rem 0 1rem; }
+    .badges img { height: 20px; display: block; }
   </style>
 </head>
 <body>
   <main>
     <h1>bevy_iroh</h1>
-    <p>Share Bevy entities between peers over iroh, with voice and video. This page is the
-      <a href="https://github.com/rvdende/bevy_iroh">README</a>, and the demos below are the
-      crate's examples built for the browser.</p>
+    <p class="badges">
+      <a href="https://crates.io/crates/bevy_iroh"><img alt="crates.io" src="https://img.shields.io/crates/v/bevy_iroh.svg"></a>
+      <a href="https://docs.rs/bevy_iroh"><img alt="docs.rs" src="https://docs.rs/bevy_iroh/badge.svg"></a>
+      <a href="https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml/badge.svg"></a>
+      <a href="https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml"><img alt="pages" src="https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml/badge.svg"></a>
+    </p>
+    <p>Share Bevy entities between peers over iroh, with voice and video.
+      Code and issues: <a href="https://github.com/rvdende/bevy_iroh">github.com/rvdende/bevy_iroh</a> ·
+      crate: <a href="https://crates.io/crates/bevy_iroh">crates.io/crates/bevy_iroh</a> ·
+      API docs: <a href="https://docs.rs/bevy_iroh">docs.rs/bevy_iroh</a>.
+      The README follows the demos below, which are the crate's examples built for the browser.</p>
     <div class="demos">
       <a class="demo" href="webcam/"><b>webcam</b>Voice and a camera: everyone's picture floats over their sphere. <small>Asks for microphone and camera.</small></a>
       <a class="demo" href="voice/"><b>voice</b>Voice only, with a mute button, a meter and device pickers. <small>Asks for a microphone.</small></a>
