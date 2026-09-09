@@ -1,0 +1,24 @@
+# Format, lint, test, and the browser build: what `just check` runs, on every push and PR.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Native dependencies (cpal, cmake for libopus and openh264)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --features ui,webrtc,v4l2 --all-targets -- -D warnings
+      - run: cargo test --features ui,webrtc,v4l2
+      - run: cargo check --target wasm32-unknown-unknown --features ui,wasm,webrtc --examples

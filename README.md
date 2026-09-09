@@ -1,6 +1,12 @@
 # bevy_iroh
 
+[![crates.io](https://img.shields.io/crates/v/bevy_iroh.svg)](https://crates.io/crates/bevy_iroh)
+[![docs.rs](https://docs.rs/bevy_iroh/badge.svg)](https://docs.rs/bevy_iroh)
+[![ci](https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml/badge.svg)](https://github.com/rvdende/bevy_iroh/actions/workflows/ci.yml)
+[![pages](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml/badge.svg)](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml)
+
 Live demos, in a browser tab: [rvdende.github.io/bevy_iroh](https://rvdende.github.io/bevy_iroh/).
+Code and issues: [github.com/rvdende/bevy_iroh](https://github.com/rvdende/bevy_iroh).
 
 Share Bevy entities between peers over [iroh](https://iroh.computer): QUIC dialled by public
 key, hole punching with relay fallback, gossip for the room, direct streams for one peer. No

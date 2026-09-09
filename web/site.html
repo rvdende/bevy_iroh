@@ -48,7 +48,7 @@
   <script>
     fetch("README.md").then(r => r.text()).then(md => {
       // The title and the demo link are already this page's own header.
-      md = md.replace(/^# bevy_iroh\s*\n/, "").replace(/^Live demos[^\n]*\n\s*\n/m, "");
+      md = md.replace(/^# bevy_iroh\s*\n/, "").replace(/^(\[!\[[^\n]*\n)+/m, "").replace(/^Live demos[^\n]*\n(Code and issues[^\n]*\n)?\s*\n/m, "");
       document.getElementById("readme").innerHTML = marked.parse(md);
       document.querySelectorAll("#readme pre code").forEach(el => {
         if (!el.className.includes("language-")) el.classList.add("language-rust");
