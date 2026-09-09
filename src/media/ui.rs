@@ -41,13 +41,16 @@ impl Plugin for MediaUiPlugin {
                 build_panels,
                 build_meters,
                 build_mute_buttons,
+                build_camera_buttons,
                 build_pickers,
                 toggle_panels,
                 mute_clicks,
+                camera_clicks,
                 picker_clicks,
                 row_hover,
                 sync_meters,
                 sync_mute_buttons,
+                sync_camera_buttons,
                 build_indicators,
                 sync_indicators,
             ),
@@ -140,6 +143,9 @@ fn build_panels(mut commands: Commands, panels: Query<(Entity, &MediaPanel), Add
                 parent.commands().entity(strip).with_children(|strip| {
                     strip.spawn(MuteButton);
                     strip.spawn(MicMeter::default());
+                    if panel.video {
+                        strip.spawn(CameraButton);
+                    }
                     strip
                         .spawn((
                             DevicesButton(drawer),
@@ -298,6 +304,75 @@ fn sync_mute_buttons(
         ("Muted", MUTED)
     } else {
         ("Mic on", TEXT)
+    };
+    for (mut label, mut tint) in &mut labels {
+        if label.0 != text {
+            label.0 = text.into();
+            tint.0 = colour;
+        }
+    }
+}
+
+// -- camera on and off ---------------------------------------------------------------------
+
+/// A button that turns the camera off and on again: off is [`CameraChoice::None`], on is
+/// whatever was chosen before. Reads "Cam on" or "Cam off".
+#[derive(Component, Debug, Clone, Default)]
+pub struct CameraButton;
+
+#[derive(Component)]
+struct CameraLabel;
+
+fn build_camera_buttons(mut commands: Commands, buttons: Query<Entity, Added<CameraButton>>) {
+    for entity in &buttons {
+        commands
+            .entity(entity)
+            .insert((
+                Button,
+                Node {
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                    min_width: Val::Px(64.0),
+                    justify_content: JustifyContent::Center,
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(ROW),
+            ))
+            .with_child((
+                CameraLabel,
+                Text::new("Cam on"),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT),
+            ));
+    }
+}
+
+fn camera_clicks(
+    buttons: Query<&Interaction, (With<CameraButton>, Changed<Interaction>)>,
+    mut settings: ResMut<MediaSettings>,
+    mut before: Local<Option<CameraChoice>>,
+) {
+    for interaction in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if settings.camera == CameraChoice::None {
+            settings.camera = before.take().unwrap_or(CameraChoice::Default);
+        } else {
+            *before = Some(settings.camera.clone());
+            settings.camera = CameraChoice::None;
+        }
+    }
+}
+
+fn sync_camera_buttons(
+    settings: Res<MediaSettings>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<CameraLabel>>,
+) {
+    let (text, colour) = if settings.camera == CameraChoice::None {
+        ("Cam off", MUTED)
+    } else {
+        ("Cam on", TEXT)
     };
     for (mut label, mut tint) in &mut labels {
         if label.0 != text {

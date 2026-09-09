@@ -32,7 +32,7 @@ pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};
 pub mod prelude {
     #[cfg(feature = "ui")]
     pub use crate::media::ui::{
-        DevicePicker, MediaPanel, MediaUiPlugin, MicMeter, MuteButton, VoiceIndicator,
+        CameraButton, DevicePicker, MediaPanel, MediaUiPlugin, MicMeter, MuteButton, VoiceIndicator,
     };
     #[cfg(feature = "media")]
     pub use crate::media::{

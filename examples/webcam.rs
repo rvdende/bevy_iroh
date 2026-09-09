@@ -8,10 +8,16 @@
 //!
 //! Everything the `voice` example does, plus a `VideoFeed` on the same entity fed by the
 //! camera picked under "Devices". Your own picture shows over your sphere too, so what you
-//! send is what you see.
+//! send is what you see. Enter opens the chat box at the bottom left; what anyone types
+//! floats over their sphere for fifteen seconds and lands in the log.
 #![allow(clippy::type_complexity)]
 
-use bevy::{prelude::*, window::WindowPlugin};
+use bevy::{
+    input::keyboard::{Key, KeyboardInput},
+    prelude::*,
+    ui::{UiTransform, Val2},
+    window::WindowPlugin,
+};
 use bevy_iroh::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +25,10 @@ use serde::{Deserialize, Serialize};
 struct Avatar {
     hue: f32,
 }
+
+/// One line of chat, broadcast to the room.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Chat(String);
 
 fn main() {
     App::new()
@@ -28,8 +38,11 @@ fn main() {
             MediaUiPlugin,
         ))
         .replicate::<Avatar>()
+        .add_net_message::<Chat>()
+        .init_resource::<Composer>()
         .add_systems(Startup, setup)
         .add_systems(Update, (drive, print_ticket, announce, screens, page_title))
+        .add_systems(Update, (compose, receive_chat, bubbles, chat_ui).chain())
         .add_observer(dress)
         .run();
 }
@@ -60,6 +73,7 @@ fn setup(
         ),
     ));
     commands.spawn(MediaPanel::video());
+    chat_panel(&mut commands);
 
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
@@ -123,8 +137,13 @@ fn screens(
 fn drive(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    composer: Res<Composer>,
     mut mine: Query<(&mut Transform, &mut Voice), (With<Avatar>, Without<Remote>)>,
 ) {
+    // The keys belong to the chat box while it is open.
+    if composer.typing {
+        return;
+    }
     let mut dir = Vec3::ZERO;
     if keys.pressed(KeyCode::ArrowLeft) {
         dir.x -= 1.0;
@@ -243,5 +262,265 @@ fn window_plugin() -> WindowPlugin {
     #[cfg(not(target_arch = "wasm32"))]
     {
         WindowPlugin::default()
+    }
+}
+
+// -- chat ------------------------------------------------------------------------------------
+
+/// The line being typed, if the chat box is open.
+#[derive(Resource, Default)]
+struct Composer {
+    typing: bool,
+    text: String,
+}
+
+/// The last thing an avatar said, and when.
+#[derive(Component)]
+struct Said {
+    text: String,
+    at: f64,
+}
+
+/// The floating line over an avatar.
+#[derive(Component)]
+struct Bubble(Entity);
+
+#[derive(Component)]
+struct ChatLog;
+
+#[derive(Component)]
+struct ChatInput;
+
+/// How long a bubble stays before it fades, and how long the fade takes.
+const BUBBLE_HOLD: f64 = 15.0;
+const BUBBLE_FADE: f64 = 1.0;
+/// Lines the log keeps.
+const LOG_LINES: usize = 14;
+
+/// Enter opens the box; Enter sends, Escape closes; while it is open the keys are text.
+fn compose(
+    mut keys: MessageReader<KeyboardInput>,
+    mut composer: ResMut<Composer>,
+    net: NetSender,
+    time: Res<Time<bevy::time::Real>>,
+    mine: Query<Entity, (With<Avatar>, Without<Remote>)>,
+    mut commands: Commands,
+    log: Query<Entity, With<ChatLog>>,
+) {
+    for key in keys.read() {
+        if !key.state.is_pressed() {
+            continue;
+        }
+        if !composer.typing {
+            if key.logical_key == Key::Enter {
+                composer.typing = true;
+            }
+            continue;
+        }
+        match &key.logical_key {
+            Key::Enter => {
+                let text = std::mem::take(&mut composer.text);
+                composer.typing = false;
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                net.broadcast_all(&Chat(text.clone()));
+                for avatar in &mine {
+                    commands.entity(avatar).insert(Said {
+                        text: text.clone(),
+                        at: time.elapsed_secs_f64(),
+                    });
+                }
+                if let Ok(log) = log.single() {
+                    log_line(&mut commands, log, &format!("{}: {text}", display_name()));
+                }
+            }
+            Key::Escape => {
+                composer.typing = false;
+                composer.text.clear();
+            }
+            Key::Backspace => {
+                composer.text.pop();
+            }
+            Key::Space => composer.text.push(' '),
+            Key::Character(c) => composer.text.push_str(c),
+            _ => {}
+        }
+    }
+}
+
+/// A peer's line goes over their avatar and into the log.
+fn receive_chat(
+    mut chats: MessageReader<Received<Chat>>,
+    peers: Query<&Peer>,
+    avatars: Query<(Entity, &Owner), With<Avatar>>,
+    time: Res<Time<bevy::time::Real>>,
+    mut commands: Commands,
+    log: Query<Entity, With<ChatLog>>,
+) {
+    for received in chats.read() {
+        let who = received
+            .peer
+            .and_then(|p| peers.get(p).ok())
+            .map(|p| p.label())
+            .unwrap_or_else(|| received.from.fmt_short().to_string());
+        for (avatar, owner) in &avatars {
+            if owner.0 == received.from {
+                commands.entity(avatar).insert(Said {
+                    text: received.msg.0.clone(),
+                    at: time.elapsed_secs_f64(),
+                });
+            }
+        }
+        if let Ok(log) = log.single() {
+            log_line(&mut commands, log, &format!("{who}: {}", received.msg.0));
+        }
+    }
+}
+
+/// Bubbles follow their avatar on screen, hold, fade, and go. A new line replaces the old
+/// one at once, since `Said` is one component.
+fn bubbles(
+    mut commands: Commands,
+    time: Res<Time<bevy::time::Real>>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    said: Query<(Entity, &Said, &GlobalTransform)>,
+    mut existing: Query<(
+        Entity,
+        &Bubble,
+        &mut Node,
+        &mut Text,
+        &mut TextColor,
+        &mut BackgroundColor,
+    )>,
+) {
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let now = time.elapsed_secs_f64();
+    // One bubble per talking avatar.
+    for (avatar, said, _) in &said {
+        if !existing.iter().any(|(_, b, ..)| b.0 == avatar) {
+            commands.spawn((
+                Bubble(avatar),
+                Node {
+                    position_type: PositionType::Absolute,
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                    max_width: Val::Px(260.0),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                UiTransform::from_translation(Val2::new(Val::Percent(-50.0), Val::Percent(-100.0))),
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.11, 0.85)),
+                Text::new(said.text.clone()),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::WHITE),
+                Pickable::IGNORE,
+            ));
+        }
+    }
+    for (entity, bubble, mut node, mut text, mut colour, mut background) in &mut existing {
+        let Ok((_, said, transform)) = said.get(bubble.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let age = now - said.at;
+        if age > BUBBLE_HOLD + BUBBLE_FADE {
+            commands.entity(entity).despawn();
+            commands.entity(bubble.0).remove::<Said>();
+            continue;
+        }
+        if text.0 != said.text {
+            text.0 = said.text.clone();
+        }
+        let alpha = (1.0 - (age - BUBBLE_HOLD) / BUBBLE_FADE).clamp(0.0, 1.0) as f32;
+        colour.0 = Color::WHITE.with_alpha(alpha);
+        background.0 = Color::srgba(0.08, 0.09, 0.11, 0.85 * alpha);
+        // Over the head, above the picture.
+        let over = transform.translation() + Vec3::Y * 2.1;
+        match camera.world_to_viewport(camera_transform, over) {
+            Ok(at) => {
+                node.left = Val::Px(at.x);
+                node.top = Val::Px(at.y);
+                node.display = Display::Flex;
+            }
+            Err(_) => node.display = Display::None,
+        }
+    }
+}
+
+/// The log at the bottom left, newest at the bottom, with the box under it.
+fn chat_panel(commands: &mut Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(10.0),
+                bottom: Val::Px(10.0),
+                width: Val::Px(340.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.09, 0.11, 0.85)),
+            Pickable::IGNORE,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                ChatLog,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    ..default()
+                },
+            ));
+            panel.spawn((
+                ChatInput,
+                Text::new("Enter to chat"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgb(0.6, 0.6, 0.65)),
+            ));
+        });
+}
+
+fn log_line(commands: &mut Commands, log: Entity, line: &str) {
+    let text = commands
+        .spawn((
+            Text::new(line.to_string()),
+            TextFont::from_font_size(13.0),
+            TextColor(Color::srgb(0.92, 0.92, 0.94)),
+        ))
+        .id();
+    commands.entity(log).add_child(text);
+}
+
+/// The box shows what is being typed, and the log keeps its last lines.
+fn chat_ui(
+    composer: Res<Composer>,
+    mut input: Query<(&mut Text, &mut TextColor), With<ChatInput>>,
+    log: Query<&Children, With<ChatLog>>,
+    mut commands: Commands,
+) {
+    for (mut text, mut colour) in &mut input {
+        let (wanted, tint) = if composer.typing {
+            (format!("> {}_", composer.text), Color::WHITE)
+        } else {
+            ("Enter to chat".to_string(), Color::srgb(0.6, 0.6, 0.65))
+        };
+        if text.0 != wanted {
+            text.0 = wanted;
+            colour.0 = tint;
+        }
+    }
+    for children in &log {
+        for old in children
+            .iter()
+            .take(children.len().saturating_sub(LOG_LINES))
+        {
+            commands.entity(old).despawn();
+        }
     }
 }

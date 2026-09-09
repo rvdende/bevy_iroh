@@ -545,7 +545,7 @@ fn apply_settings(
             if matches!(inputs.get(entity).map(|i| &i.kind), Ok(InputKind::Camera)) {
                 commands
                     .entity(entity)
-                    .remove::<(Encoding, CameraRetry, VideoFeedStats)>();
+                    .remove::<(Encoding, CameraRetry, VideoFeedStats, VideoImage)>();
             }
         }
     }

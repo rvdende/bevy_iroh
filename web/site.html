@@ -9,7 +9,8 @@
     body { margin: 0; font: 16px/1.55 system-ui, sans-serif; background: #202428; color: #e6e6ea; }
     main { max-width: 52rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
     a { color: #6fd38a; }
-    pre { background: #15171a; padding: .8rem 1rem; overflow-x: auto; border-radius: 6px; }
+    pre { background: #15171a; padding: 0; overflow-x: auto; border-radius: 6px; }
+    pre code { display: block; padding: .8rem 1rem; }
     code { font-size: .92em; }
     :not(pre) > code { background: #15171a; padding: .1em .35em; border-radius: 4px; }
     table { border-collapse: collapse; }
@@ -40,10 +41,19 @@
       the first few seconds before that link is up go through a relay.</p>
     <article id="readme">Loading the README…</article>
   </main>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/rust.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
   <script>
     fetch("README.md").then(r => r.text()).then(md => {
+      // The title and the demo link are already this page's own header.
+      md = md.replace(/^# bevy_iroh\s*\n/, "").replace(/^Live demos[^\n]*\n\s*\n/m, "");
       document.getElementById("readme").innerHTML = marked.parse(md);
+      document.querySelectorAll("#readme pre code").forEach(el => {
+        if (!el.className.includes("language-")) el.classList.add("language-rust");
+        hljs.highlightElement(el);
+      });
     }).catch(e => { document.getElementById("readme").textContent = "Could not load the README: " + e; });
   </script>
 </body>
