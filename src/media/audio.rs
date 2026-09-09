@@ -327,6 +327,8 @@ pub struct RemoteTrack {
     /// Peak since the last look, as f32 bits.
     peak: AtomicU32,
     received: AtomicU64,
+    /// Decoded frames waiting, on the eager path.
+    depth: AtomicU32,
 }
 
 impl Default for RemoteTrack {
@@ -344,6 +346,7 @@ impl RemoteTrack {
             level: AtomicU32::new(0.0f32.to_bits()),
             peak: AtomicU32::new(0),
             received: AtomicU64::new(0),
+            depth: AtomicU32::new(0),
         }
     }
 
@@ -390,7 +393,11 @@ impl RemoteTrack {
             regrows: j.regrows,
             shrinks: j.shrinks,
             target_ms: (j.target * 20) as u32,
-            depth: j.frames.len() as u32,
+            depth: if EAGER {
+                self.depth.load(Ordering::Relaxed)
+            } else {
+                j.frames.len() as u32
+            },
         }
     }
 
@@ -408,6 +415,10 @@ impl RemoteTrack {
         self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
     }
 }
+
+/// Whether frames are decoded as they arrive rather than as the output asks: what a decoder
+/// that answers on a later task needs, so a page decodes eagerly.
+const EAGER: bool = cfg!(target_arch = "wasm32");
 
 /// Frames the buffer holds before it starts playing: 60 ms.
 const JITTER_START: usize = 3;
@@ -518,6 +529,57 @@ impl Jitter {
         Pull::Lost {
             next: self.frames.get(&next.wrapping_add(1)).cloned(),
         }
+    }
+
+    /// The eager form of [`Jitter::pull`], for a decoder that answers later: the next frame
+    /// if it is here, a concealment once two later frames have arrived without it, and
+    /// `None` to wait. Priming still banks the target before the first pull.
+    fn pull_ready(&mut self) -> Option<Pull> {
+        let target = self.target();
+        if self.priming {
+            if self.frames.len() < target {
+                return None;
+            }
+            self.priming = false;
+        }
+        let next = match self.next {
+            Some(next) => next,
+            None => *self.frames.keys().next()?,
+        };
+        if let Some(frame) = self.frames.remove(&next) {
+            self.next = Some(next.wrapping_add(1));
+            self.played_one();
+            return Some(Pull::Frame(frame));
+        }
+        // A gap: give the missing frame a reorder window before concealing it.
+        if self.frames.len() < 2 {
+            return None;
+        }
+        self.next = Some(next.wrapping_add(1));
+        self.concealed += 1;
+        self.played_one();
+        Some(Pull::Lost {
+            next: self.frames.get(&next.wrapping_add(1)).cloned(),
+        })
+    }
+
+    /// The decoded side ran dry: the same underrun as [`Jitter::underrun`], reported from
+    /// the sample buffer rather than the frame buffer.
+    fn starved_pcm(&mut self) {
+        let _ = self.underrun();
+    }
+
+    /// [`Jitter::drift`] for a backlog that lives after the decoder, in frames.
+    fn drift_for(&mut self, backlog_frames: f64) -> f64 {
+        const MAX_DRIFT: f64 = 0.02;
+        let target = self.target() as f64;
+        (1.0 + ((backlog_frames - target) / target) * MAX_DRIFT)
+            .clamp(1.0 - MAX_DRIFT, 1.0 + MAX_DRIFT)
+    }
+
+    /// Frames the sample buffer may hold before the oldest are dropped.
+    fn keep_frames(&mut self) -> usize {
+        self.target() + JITTER_SLACK
     }
 
     fn played_one(&mut self) {
@@ -663,9 +725,37 @@ impl Mixer {
         }
     }
 
+    /// Decode whatever `track` has ready, now: for a decoder that answers on a later task,
+    /// so the samples are there when the output asks. The jitter buffer keeps its priming
+    /// and its reorder window; the backlog it would have held moves to the decoded side.
+    pub fn pump(&mut self, track: u64) {
+        self.sync_tracks();
+        let Some((_, playing)) = self.playing.iter_mut().find(|(id, _)| *id == track) else {
+            return;
+        };
+        loop {
+            let pull = playing
+                .track
+                .jitter
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pull_ready();
+            match pull {
+                Some(Pull::Frame(bytes)) => playing.decoder.push(Packet::Data(&bytes)),
+                Some(Pull::Lost { next: Some(bytes) }) => playing.decoder.push(Packet::Fec(&bytes)),
+                Some(Pull::Lost { next: None }) => playing.decoder.push(Packet::Lost),
+                None | Some(Pull::Idle) => return,
+            }
+        }
+    }
+
     /// Fill `out`, interleaved with `channels` channels at `rate`, with the mix of every remote
     /// track. Silence where nothing is playing. A track that cannot fill the whole buffer
     /// contributes silence for the whole buffer: one clean gap, not a splice.
+    ///
+    /// With a synchronous decoder (libopus) frames are decoded here as needed. With one that
+    /// answers later (WebCodecs) they were decoded on arrival by [`Mixer::pump`], and the
+    /// backlog, the drift and the underruns are measured on the decoded samples instead.
     pub fn render(&mut self, out: &mut [f32], channels: usize, rate: u32) {
         out.fill(0.0);
         let channels = channels.max(1);
@@ -676,20 +766,63 @@ impl Mixer {
         self.sync_tracks();
         let base_step = RATE as f64 / rate.max(1) as f64;
         let volume = f32::from_bits(self.volume.load(Ordering::Relaxed)).clamp(0.0, 4.0);
-        for (_, playing) in &mut self.playing {
-            let drift = playing
-                .track
-                .jitter
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drift();
+        for (id, playing) in &mut self.playing {
+            let eager = EAGER;
+            if eager {
+                self.hub.pump_hint(*id);
+                let before = playing.pcm.len();
+                if playing.decoder.drain(&mut playing.pcm) > 0 {
+                    playing.fresh.clear();
+                    playing.fresh.extend(playing.pcm.range(before..));
+                    playing.track.meter(&playing.fresh);
+                }
+                let mut jitter = playing
+                    .track
+                    .jitter
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                // Backlog past what the target allows is latency: drop the oldest.
+                let keep = jitter.keep_frames() * FRAME;
+                if playing.pcm.len() > keep {
+                    let extra = playing.pcm.len() - keep;
+                    playing.pcm.drain(..extra);
+                    jitter.dropped += 1;
+                }
+                playing
+                    .track
+                    .depth
+                    .store((playing.pcm.len() / FRAME) as u32, Ordering::Relaxed);
+            }
+            let drift = {
+                let mut jitter = playing
+                    .track
+                    .jitter
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if eager {
+                    jitter.drift_for(playing.pcm.len() as f64 / FRAME as f64)
+                } else {
+                    jitter.drift()
+                }
+            };
             let step = base_step * drift;
             let end = playing.pos + frames_out as f64 * step;
             let needed = end.ceil() as usize + 1;
-            Self::top_up(playing, needed);
+            if !eager {
+                Self::top_up(playing, needed);
+            }
             if playing.pcm.len() < needed {
                 // Whole buffer of silence; what is banked plays once there is enough.
                 playing.pos = 0.0;
+                if eager && playing.pcm.is_empty() && playing.decoder.in_flight() == 0 {
+                    playing
+                        .track
+                        .jitter
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .starved_pcm();
+                    playing.track.level.store(0f32.to_bits(), Ordering::Relaxed);
+                }
                 continue;
             }
             let gain = playing.track.gain() * volume;
@@ -874,6 +1007,29 @@ mod tests {
         }
         assert_eq!(j.target, JITTER_START);
         assert!(j.shrinks >= 1);
+    }
+
+    #[test]
+    fn eager_pull_waits_for_the_reorder_window() {
+        let mut j = Jitter::default();
+        assert!(j.pull_ready().is_none());
+        for seq in 0..3u32 {
+            j.push(seq, frame(seq as u8));
+        }
+        assert!(matches!(j.pull_ready(), Some(Pull::Frame(b)) if b[0] == 0));
+        assert!(matches!(j.pull_ready(), Some(Pull::Frame(b)) if b[0] == 1));
+        assert!(matches!(j.pull_ready(), Some(Pull::Frame(b)) if b[0] == 2));
+        // Nothing yet: wait, not underrun.
+        assert!(j.pull_ready().is_none());
+        assert_eq!(j.starved, 0);
+        // 3 missing, 4 here: still wait for one more before giving up on 3.
+        j.push(4, frame(4));
+        assert!(j.pull_ready().is_none());
+        j.push(5, frame(5));
+        assert!(matches!(j.pull_ready(), Some(Pull::Lost { next: Some(b) }) if b[0] == 4));
+        assert!(matches!(j.pull_ready(), Some(Pull::Frame(b)) if b[0] == 4));
+        assert!(matches!(j.pull_ready(), Some(Pull::Frame(b)) if b[0] == 5));
+        assert_eq!(j.concealed, 1);
     }
 
     #[test]

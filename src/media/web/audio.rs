@@ -171,6 +171,20 @@ thread_local! {
     static SESSIONS: RefCell<Vec<Session>> = const { RefCell::new(Vec::new()) };
     static OUTPUT: RefCell<Option<AudioContext>> = const { RefCell::new(None) };
     static PLAYING: RefCell<Vec<Playback>> = const { RefCell::new(Vec::new()) };
+    /// The mixer behind the output, so a frame can be decoded the moment it arrives rather
+    /// than when the output next asks: WebCodecs answers on a later task, and a decode
+    /// started at render time is a block late every time.
+    static MIXER: RefCell<Option<Arc<Mutex<Mixer>>>> = const { RefCell::new(None) };
+}
+
+/// A voice frame for `track` just landed on the network: decode it now.
+pub(crate) fn arrived(track: u64) {
+    let mixer = MIXER.with(|m| m.borrow().clone());
+    if let Some(mixer) = mixer
+        && let Ok(mut mixer) = mixer.try_lock()
+    {
+        mixer.pump(track);
+    }
 }
 
 /// Start capturing and encoding from what the settings name. `Ok(false)` is nothing to open
@@ -391,6 +405,7 @@ impl AudioOutput for Speaker {
         gain.gain().set_value(1.0);
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        MIXER.with(|m| *m.borrow_mut() = Some(mixer.clone()));
         let mut interleaved: Vec<f32> = Vec::new();
         let mut left: Vec<f32> = Vec::new();
         let mut right: Vec<f32> = Vec::new();
@@ -584,6 +599,7 @@ pub(crate) fn sweep() {
             let _ = p.processor.disconnect();
             let _ = p.gain.disconnect();
             p.callback = None;
+            MIXER.with(|m| *m.borrow_mut() = None);
             false
         });
     });

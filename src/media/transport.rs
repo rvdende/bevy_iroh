@@ -297,6 +297,17 @@ impl MediaHub {
         });
     }
 
+    /// A voice frame just landed: where decoding is asynchronous, start it now.
+    fn arrived(&self, track: u64) {
+        #[cfg(target_arch = "wasm32")]
+        super::web::audio::arrived(track);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = track;
+    }
+
+    /// Nothing to do at render time; decoding was started on arrival.
+    pub(crate) fn pump_hint(&self, _track: u64) {}
+
     // -- WebRTC links -----------------------------------------------------------------------
 
     /// The WebRTC link to `peer`, if one is up.
@@ -368,6 +379,7 @@ impl MediaHub {
                 let seq = u32::from_le_bytes(data[9..13].try_into().expect("4 bytes"));
                 if let Some(remote) = self.remote(track) {
                     remote.push(seq, Bytes::copy_from_slice(&data[HEADER..]));
+                    self.arrived(track);
                 }
             }
             Some(&TAG_VIDEO) if data.len() >= VIDEO_MESSAGE_HEADER => {
@@ -564,6 +576,7 @@ impl MediaHub {
             let seq = u32::from_le_bytes(datagram[9..13].try_into().expect("4 bytes"));
             if let Some(remote) = self.remote(track) {
                 remote.push(seq, datagram.slice(HEADER..));
+                self.arrived(track);
             }
         }
     }
