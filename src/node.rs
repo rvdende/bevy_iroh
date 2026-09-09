@@ -317,7 +317,7 @@ impl Plugin for IrohPlugin {
         #[allow(unused_mut)]
         let mut protocols =
             std::mem::take(&mut *self.protocols.lock().unwrap_or_else(|e| e.into_inner()));
-        #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+        #[cfg(feature = "media")]
         let hub = {
             let hub = Arc::new(crate::media::MediaHub::default());
             protocols.push((
@@ -365,7 +365,7 @@ impl Plugin for IrohPlugin {
                 transform: self.replicate_transform,
             },
         ));
-        #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+        #[cfg(feature = "media")]
         app.add_plugins(crate::media::MediaPlugin { hub });
     }
 }

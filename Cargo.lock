@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_iroh"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bevy",
@@ -1171,6 +1171,7 @@ dependencies = [
  "data-encoding",
  "iroh",
  "iroh-gossip",
+ "js-sys",
  "n0-future",
  "openh264",
  "opus",
@@ -1182,6 +1183,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
  "web-time",

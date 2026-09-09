@@ -1,15 +1,13 @@
 # bevy_iroh — plan
 
-**Status (2026-09-08):** M1–M3 built and pushed to github.com/rvdende/bevy_iroh: node, rooms,
-presence, replication with codecs, typed messages, the cube example, and the two-app test.
-0.1.0 is on crates.io. M5 voice and M6 video are built as the `media` feature: opus over QUIC
-datagrams and H.264 over one QUIC stream per group, on a `bevy_iroh/media/1` ALPN of our own
-rather than the MoQ stack, so nothing depends on iroh-live or on any git crate. The `v4l2`
-adapter (bevy_v4l2 0.3 colour tap) and the `wasm` feature are in; a headless browser test
-joins two page apps over n0's relays in five seconds. `Iroh::add_relay` and `NetStats` exist
-for substrate's registry client and network menu; substrate migration is under way on
-robot2's `bevy-iroh` branch (see `crates/substrate/MIGRATION.md` there). Substrate's voice buffering rules are ported into `media/audio.rs`.
-Next: browser media (WebCodecs, Web Audio), then substrate onto bevy_iroh.
+**Status (2026-09-09):** M1–M7 built. 0.3.0: the `media` feature runs natively (cpal, libopus,
+openh264) and in a browser (Web Audio, WebCodecs, Annex B H.264 both ways), with device
+choice through `MediaSettings` + `AudioDevices` / `CameraDevices`, a preview `VideoImage` on
+local feeds, per-subscriber video fan-out with a 150 ms catch-up rule, and the `ui` feature
+(`MediaPanel`, `VoiceIndicator`). `examples/voice.rs` and `examples/webcam.rs` replace
+`conference`. Substrate's voice buffering rules are in `media/audio.rs`; substrate migration is
+on robot2's `bevy-iroh` branch (`crates/substrate/MIGRATION.md`). Next: substrate onto
+bevy_iroh; echo cancellation on desktops; a hardware encoder path.
 
 A Bevy plugin that makes entities shareable between peers over [iroh](https://iroh.computer):
 QUIC dialled by public key, hole punching with relay fallback, gossip for the group, direct

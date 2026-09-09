@@ -11,7 +11,7 @@
 //! ```
 #![allow(clippy::type_complexity)]
 
-#[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+#[cfg(feature = "media")]
 pub mod media;
 pub mod message;
 pub mod net;
@@ -30,10 +30,15 @@ pub use net::{
 pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};
 
 pub mod prelude {
-    #[cfg(all(feature = "media", not(target_arch = "wasm32")))]
+    #[cfg(feature = "ui")]
+    pub use crate::media::ui::{
+        DevicePicker, MediaPanel, MediaUiPlugin, MicMeter, MuteButton, VoiceIndicator,
+    };
+    #[cfg(feature = "media")]
     pub use crate::media::{
-        AudioListener, MediaSettings, TestPattern, VideoFeed, VideoImage, VideoInput, Voice,
-        VoiceLevel, VoiceStats,
+        AudioDevice, AudioDevices, AudioListener, CameraChoice, CameraDevice, CameraDevices,
+        MediaSettings, MicLevel, MicrophoneChoice, SpeakerChoice, TestPattern, VideoFeed,
+        VideoFeedStats, VideoImage, VideoInput, VideoStats, Voice, VoiceLevel, VoiceStats,
     };
     pub use crate::{
         Identity, Iroh, IrohPlugin, IrohSet, Link, NetStats, Relays, RoomTicket, Stats, Via,

@@ -1,5 +1,9 @@
 # `cargo test --target wasm32-unknown-unknown --features wasm` runs tests/wasm.rs in a headless
 # browser through wasm-bindgen-test-runner (`cargo install wasm-bindgen-cli`), using geckodriver
 # or chromedriver from PATH (`GECKODRIVER=... ` / `CHROMEDRIVER=...` to point at one).
+#
+# WebCodecs (VideoEncoder, AudioData, ...) is behind web-sys's unstable cfg. Needed only for
+# the browser build of the `media` feature; harmless otherwise.
 [target.wasm32-unknown-unknown]
 runner = "wasm-bindgen-test-runner"
+rustflags = ["--cfg=web_sys_unstable_apis"]

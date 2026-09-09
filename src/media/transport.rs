@@ -3,8 +3,9 @@
 //! A subscriber dials the owner of a track and opens one control stream on which it names the
 //! tracks it wants. Audio then flows back as QUIC datagrams: unreliable and unordered, which is
 //! what a 20 ms voice frame wants, since a retransmitted frame arrives too late to be worth
-//! hearing. Nothing here touches gossip; the announce that a track exists is the replicated
-//! component on the entity, and the track id is that entity's `NetId`.
+//! hearing. Video is one QUIC stream per group of pictures, newer groups at higher priority.
+//! Nothing here touches gossip; the announce that a track exists is the replicated component
+//! on the entity, and the track id is that entity's `NetId`.
 
 use std::{
     collections::HashMap,
@@ -46,8 +47,16 @@ pub enum TrackKind {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum Control {
-    Subscribe { track: u64 },
-    Unsubscribe { track: u64 },
+    Subscribe {
+        track: u64,
+    },
+    Unsubscribe {
+        track: u64,
+    },
+    /// The subscriber's decoder lost its place; the next frame should be a keyframe.
+    Keyframe {
+        track: u64,
+    },
 }
 
 /// State shared by the Bevy side, the protocol handler, the audio threads and the sessions.
@@ -200,7 +209,7 @@ impl MediaHub {
             TrackKind::Video => {
                 lock(&self.remote_video)
                     .entry(track)
-                    .or_insert_with(|| Arc::new(RemoteVideo::new()));
+                    .or_insert_with(|| Arc::new(RemoteVideo::new(track)));
             }
         }
         let mut sessions = self.sessions.lock().await;
@@ -246,6 +255,14 @@ impl MediaHub {
         if session.tracks.is_empty() {
             let session = sessions.remove(&owner).expect("present");
             session.conn.close(0u32.into(), b"done");
+        }
+    }
+
+    /// Ask the owner of `track` for a keyframe: the decoder here lost its place.
+    pub async fn request_keyframe(self: &Arc<Self>, owner: EndpointId, track: u64) {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&owner) {
+            let _ = write_control(&mut session.control, &Control::Keyframe { track }).await;
         }
     }
 
@@ -325,7 +342,7 @@ impl MediaHub {
         }
     }
 
-    /// Write one video frame to a group stream. `None` returns are the stream having gone.
+    /// Write one video frame to a group stream. An error is the stream having gone.
     pub(crate) async fn write_video_frame(
         stream: &mut SendStream,
         packet: &VideoPacket,
@@ -339,13 +356,15 @@ impl MediaHub {
         Ok(())
     }
 
-    /// Open a group stream on `conn` for `track`.
+    /// Open a group stream on `conn` for `track`. Newer groups get higher priority, so a group
+    /// still draining when the next one starts cannot hold the picture back.
     pub(crate) async fn open_group(
         conn: &Connection,
         track: u64,
         group: u32,
     ) -> anyhow::Result<SendStream> {
         let mut stream = conn.open_uni().await?;
+        let _ = stream.set_priority(group as i32);
         let mut header = Vec::with_capacity(13);
         header.push(TAG_VIDEO);
         header.extend_from_slice(&track.to_le_bytes());
@@ -374,19 +393,24 @@ impl MediaHub {
                     }
                     drop(subs);
                     // A video subscriber can decode nothing until a keyframe.
-                    if let Some(flag) = lock(&self.keyframe_wanted).get(&track) {
-                        flag.store(true, Ordering::Relaxed);
-                    }
+                    self.want_keyframe(track);
                 }
                 Control::Unsubscribe { track } => {
                     if let Some(conns) = lock(&self.subscribers).get_mut(&track) {
                         conns.retain(|c| c.stable_id() != id);
                     }
                 }
+                Control::Keyframe { track } => self.want_keyframe(track),
             }
         }
         for conns in lock(&self.subscribers).values_mut() {
             conns.retain(|c| c.stable_id() != id);
+        }
+    }
+
+    pub(crate) fn want_keyframe(&self, track: u64) {
+        if let Some(flag) = lock(&self.keyframe_wanted).get(&track) {
+            flag.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -418,15 +442,5 @@ impl ProtocolHandler for MediaHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         self.hub.serve(connection).await;
         Ok(())
-    }
-}
-
-/// A sequence counter for one published track.
-#[derive(Default)]
-pub struct Seq(AtomicU32);
-
-impl Seq {
-    pub fn next(&self) -> u32 {
-        self.0.fetch_add(1, Ordering::Relaxed)
     }
 }

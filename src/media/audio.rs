@@ -2,7 +2,8 @@
 //!
 //! Sources and outputs are traits so the same pipeline runs against a microphone and speakers,
 //! or against a sine wave and a buffer in a test. Everything speaks mono f32 at 48 kHz inside;
-//! devices at other rates are resampled at the edges.
+//! devices at other rates are resampled at the edges. The codec is behind [`VoiceDecoder`] so
+//! that libopus on a desktop and WebCodecs in a browser feed the same mixer.
 //!
 //! The buffering rules are substrate's, learned on real calls: a buffer is standing latency,
 //! so it starts small and grows only when starved; an underrun is a whole buffer of silence
@@ -11,58 +12,159 @@
 //! nothing looks exactly like a person who is not talking".
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use bytes::Bytes;
 
-use super::transport::{MediaHub, Seq};
+use super::transport::MediaHub;
 
 pub const RATE: u32 = 48_000;
 /// 20 ms at 48 kHz: opus's sweet spot for voice.
 pub const FRAME: usize = 960;
 /// The longest frame opus allows, 120 ms: a peer on another build may send them.
-const MAX_DECODED: usize = 5760;
-const MAX_PACKET: usize = 1275;
+pub(crate) const MAX_DECODED: usize = 5760;
 /// Opus at 64 kbps is transparent for speech.
-const BITRATE: i32 = 64_000;
+pub(crate) const BITRATE: u32 = 64_000;
 
 /// Where microphone samples come from: mono f32 at `sample_rate`.
 pub trait AudioSource: Send + 'static {
     fn sample_rate(&self) -> u32;
     /// Fill `out` with what has arrived since the last call. Returns how many were written;
-    /// fewer than asked means wait, not end. May block briefly waiting for the device.
+    /// fewer than asked means wait, not end. May block briefly waiting for the device on a
+    /// desktop; never in a browser, which polls it from a timer.
     fn read(&mut self, out: &mut [f32]) -> usize;
 }
 
-/// Where the mix goes. `start` must drive `mixer.render` on its own clock, from a thread it
-/// owns, until `stop` is set.
+/// Where the mix goes. `start` must drive `mixer.render` on its own clock until the returned
+/// handle is dropped.
 pub trait AudioOutput: Send + 'static {
-    fn start(
-        self: Box<Self>,
-        mixer: Arc<Mutex<Mixer>>,
-        stop: Arc<AtomicBool>,
-    ) -> Result<(), String>;
+    fn start(self: Box<Self>, mixer: Arc<Mutex<Mixer>>) -> Result<Running, String>;
+}
+
+/// Something running until this is dropped: a device thread, a browser audio graph.
+///
+/// Dropping sets the flag and then runs the closure, which on a desktop unparks and joins the
+/// thread so the device is released before the next open can race it. A browser has no
+/// threads; there the flag is enough and a system takes the graph apart on a later frame.
+pub struct Running {
+    stop: Arc<AtomicBool>,
+    finish: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl Running {
+    pub fn new(stop: Arc<AtomicBool>, finish: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            stop,
+            finish: Some(Box::new(finish)),
+        }
+    }
+
+    /// A flag and nothing to wait for.
+    pub fn flag(stop: Arc<AtomicBool>) -> Self {
+        Self { stop, finish: None }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(finish) = self.finish.take() {
+            finish();
+        }
+    }
 }
 
 // -- the encoder ---------------------------------------------------------------------------
 
-/// Reads a source, encodes 20 ms frames, and sends each to every published track.
+/// What the encoder shares with the Bevy side: a stop flag and two meters.
+pub(crate) struct EncoderShared {
+    pub stop: AtomicBool,
+    /// RMS of the last 20 ms frame, as f32 bits.
+    pub level: AtomicU32,
+    /// Peak absolute sample since the last look, as f32 bits. Taken with a swap to zero, so
+    /// a meter read once a frame sees the loudest moment in between rather than a sample.
+    pub peak: AtomicU32,
+}
+
+impl Default for EncoderShared {
+    fn default() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            level: AtomicU32::new(0),
+            peak: AtomicU32::new(0),
+        }
+    }
+}
+
+impl EncoderShared {
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn meter(&self, frame: &[f32]) {
+        self.level.store(rms(frame).to_bits(), Ordering::Relaxed);
+        let peak = frame.iter().fold(0f32, |m, s| m.max(s.abs()));
+        self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Cuts a stream of samples into exact frames.
 ///
-/// Frames accumulate in one growing buffer and are cut at exactly `FRAME` samples: a device
-/// delivering 512-sample blocks and an encoder wanting 960 are never in step, and encoding a
-/// short fill padded with last time's tail is a splice in every frame. Muted sends silence
-/// rather than nothing, so a muted peer reads as quiet and not as gone.
+/// A device delivering 512-sample blocks and an encoder wanting 960 are never in step, and
+/// encoding a short fill padded with last time's tail is a splice in every frame. Samples
+/// accumulate here and leave `FRAME` at a time.
+pub(crate) struct Framer {
+    resampler: Resampler,
+    pcm: Vec<f32>,
+}
+
+impl Framer {
+    pub fn new(from_rate: u32) -> Self {
+        Self {
+            resampler: Resampler::new(from_rate, RATE),
+            pcm: Vec::with_capacity(FRAME * 4),
+        }
+    }
+
+    pub fn push(&mut self, samples: &[f32]) {
+        self.resampler.push(samples, &mut self.pcm);
+    }
+
+    pub fn next_frame(&mut self) -> Option<Vec<f32>> {
+        (self.pcm.len() >= FRAME).then(|| self.pcm.drain(..FRAME).collect())
+    }
+}
+
+/// Per published track: the next sequence number.
+#[derive(Default)]
+pub(crate) struct Seqs(std::collections::HashMap<u64, u32>);
+
+impl Seqs {
+    pub fn next(&mut self, track: u64) -> u32 {
+        let seq = self.0.entry(track).or_default();
+        let n = *seq;
+        *seq = seq.wrapping_add(1);
+        n
+    }
+}
+
+/// Reads a source, encodes 20 ms frames, and sends each to every published track. Runs on
+/// its own thread until `shared.stop`; muted tracks get silence rather than nothing, so a
+/// muted peer reads as quiet and not as gone.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_encoder(
     mut source: Box<dyn AudioSource>,
     hub: Arc<MediaHub>,
-    stop: Arc<AtomicBool>,
-    level: Arc<AtomicU32>,
+    shared: Arc<EncoderShared>,
 ) {
     let mut encoder = match opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
     {
@@ -72,32 +174,36 @@ pub(crate) fn run_encoder(
             return;
         }
     };
-    let _ = encoder.set_bitrate(opus::Bitrate::Bits(BITRATE));
+    let _ = encoder.set_bitrate(opus::Bitrate::Bits(BITRATE as i32));
     let _ = encoder.set_inband_fec(true);
     let _ = encoder.set_packet_loss_perc(10);
-    let mut resampler = Resampler::new(source.sample_rate(), RATE);
+    let mut framer = Framer::new(source.sample_rate());
     let mut raw = vec![0f32; FRAME * 4];
-    let mut pcm: Vec<f32> = Vec::with_capacity(FRAME * 4);
-    let mut packet = vec![0u8; MAX_PACKET];
+    let mut packet = vec![0u8; 1275];
     let silence = vec![0f32; FRAME];
-    let mut seqs: std::collections::HashMap<u64, Seq> = Default::default();
-    while !stop.load(Ordering::Relaxed) {
+    let mut seqs = Seqs::default();
+    while !shared.stop.load(Ordering::Relaxed) {
         let n = source.read(&mut raw);
         if n == 0 {
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
         }
-        resampler.push(&raw[..n], &mut pcm);
-        while pcm.len() >= FRAME {
-            let frame: Vec<f32> = pcm.drain(..FRAME).collect();
-            level.store(rms(&frame).to_bits(), Ordering::Relaxed);
+        framer.push(&raw[..n]);
+        while let Some(frame) = framer.next_frame() {
             let published = hub.published();
+            let all_muted = !published.is_empty()
+                && published
+                    .iter()
+                    .all(|(_, muted)| muted.load(Ordering::Relaxed));
+            // The meter reads what would go out: nothing, while everything is muted.
+            if all_muted {
+                shared.meter(&silence);
+            } else {
+                shared.meter(&frame);
+            }
             if published.is_empty() {
                 continue;
             }
-            let all_muted = published
-                .iter()
-                .all(|(_, muted)| muted.load(Ordering::Relaxed));
             let mut live: Option<usize> = None;
             let mut quiet: Option<usize> = None;
             for (track, muted) in published {
@@ -121,19 +227,19 @@ pub(crate) fn run_encoder(
                         len
                     }
                 };
-                let seq = seqs.entry(track).or_default().next();
+                let seq = seqs.next(track);
                 hub.send_audio(track, seq, &packet[..len]);
             }
         }
     }
 }
 
-fn rms(frame: &[f32]) -> f32 {
+pub(crate) fn rms(frame: &[f32]) -> f32 {
     (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt()
 }
 
 /// Linear resampling. Voice does not need better, and it needs no dependency.
-struct Resampler {
+pub(crate) struct Resampler {
     from: u32,
     to: u32,
     pos: f64,
@@ -141,7 +247,7 @@ struct Resampler {
 }
 
 impl Resampler {
-    fn new(from: u32, to: u32) -> Self {
+    pub fn new(from: u32, to: u32) -> Self {
         Self {
             from,
             to,
@@ -150,7 +256,7 @@ impl Resampler {
         }
     }
 
-    fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+    pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if self.from == self.to {
             out.extend_from_slice(input);
             return;
@@ -218,7 +324,15 @@ pub struct RemoteTrack {
     pan: AtomicU32,
     /// RMS of the last decoded frame, as f32 bits.
     level: AtomicU32,
+    /// Peak since the last look, as f32 bits.
+    peak: AtomicU32,
     received: AtomicU64,
+}
+
+impl Default for RemoteTrack {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RemoteTrack {
@@ -228,6 +342,7 @@ impl RemoteTrack {
             gain: AtomicU32::new(1.0f32.to_bits()),
             pan: AtomicU32::new(0.0f32.to_bits()),
             level: AtomicU32::new(0.0f32.to_bits()),
+            peak: AtomicU32::new(0),
             received: AtomicU64::new(0),
         }
     }
@@ -255,6 +370,11 @@ impl RemoteTrack {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
+    /// Loudest sample decoded since the last call.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
     /// Frames that have arrived, ever. Advancing between two looks is the sign of life.
     pub fn received(&self) -> u64 {
         self.received.load(Ordering::Relaxed)
@@ -280,6 +400,12 @@ impl RemoteTrack {
 
     fn pan(&self) -> f32 {
         f32::from_bits(self.pan.load(Ordering::Relaxed))
+    }
+
+    fn meter(&self, decoded: &[f32]) {
+        self.level.store(rms(decoded).to_bits(), Ordering::Relaxed);
+        let peak = decoded.iter().fold(0f32, |m, s| m.max(s.abs()));
+        self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -429,30 +555,111 @@ impl Jitter {
     }
 }
 
+// -- the decoder seam ----------------------------------------------------------------------
+
+/// One packet's worth of input to a decoder.
+pub enum Packet<'a> {
+    /// A frame that arrived.
+    Data(&'a [u8]),
+    /// A frame that did not; the next one did and carries a low-bitrate copy of it.
+    Fec(&'a [u8]),
+    /// A frame that did not, with nothing to reconstruct it from: extrapolate.
+    Lost,
+}
+
+macro_rules! decoder_trait {
+    ($($bound:tt)*) => {
+        /// Turns opus packets back into 48 kHz mono. libopus answers at once; a browser's
+        /// WebCodecs answers on a later task, which is why output is drained rather than
+        /// returned. Lives on the output device's thread, where there is one.
+        pub trait VoiceDecoder $($bound)* {
+            fn push(&mut self, packet: Packet<'_>);
+            /// Move what has decoded since the last call to the end of `pcm`. Returns how many.
+            fn drain(&mut self, pcm: &mut VecDeque<f32>) -> usize;
+            /// Samples pushed and not yet answered for. Zero on a synchronous decoder.
+            fn in_flight(&self) -> usize;
+        }
+    };
+}
+#[cfg(not(target_arch = "wasm32"))]
+decoder_trait!(: Send);
+#[cfg(target_arch = "wasm32")]
+decoder_trait!();
+
+#[cfg(not(target_arch = "wasm32"))]
+struct OpusDecoder {
+    decoder: opus::Decoder,
+    scratch: Vec<f32>,
+    out: Vec<f32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl VoiceDecoder for OpusDecoder {
+    fn push(&mut self, packet: Packet<'_>) {
+        let decoded = match packet {
+            Packet::Data(bytes) => self.decoder.decode_float(bytes, &mut self.scratch, false),
+            Packet::Fec(bytes) => self.decoder.decode_float(bytes, &mut self.scratch, true),
+            Packet::Lost => self.decoder.decode_float(&[], &mut self.scratch, false),
+        }
+        .unwrap_or(0);
+        self.out.extend_from_slice(&self.scratch[..decoded]);
+    }
+
+    fn drain(&mut self, pcm: &mut VecDeque<f32>) -> usize {
+        let n = self.out.len();
+        pcm.extend(self.out.drain(..));
+        n
+    }
+
+    fn in_flight(&self) -> usize {
+        0
+    }
+}
+
+/// The platform's decoder: libopus here, WebCodecs in a page.
+pub(crate) fn new_decoder() -> Option<Box<dyn VoiceDecoder>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).ok()?;
+        Some(Box::new(OpusDecoder {
+            decoder,
+            scratch: vec![0.0; MAX_DECODED],
+            out: Vec::with_capacity(MAX_DECODED),
+        }))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        super::web::audio::new_decoder()
+    }
+}
+
 // -- the mixer -----------------------------------------------------------------------------
 
 struct Playing {
     track: Arc<RemoteTrack>,
-    decoder: opus::Decoder,
+    decoder: Box<dyn VoiceDecoder>,
     /// Decoded, at 48 kHz, waiting to be rendered.
-    pcm: std::collections::VecDeque<f32>,
+    pcm: VecDeque<f32>,
     /// Where this buffer starts between two source samples.
     pos: f64,
+    /// Samples of the last drain, for the meter.
+    fresh: Vec<f32>,
 }
 
 /// Sums every remote track into an output buffer. Owned by the output device's thread.
 pub struct Mixer {
     hub: Arc<MediaHub>,
     playing: Vec<(u64, Playing)>,
-    scratch: Vec<f32>,
+    /// Master gain, as f32 bits, shared with the settings.
+    volume: Arc<AtomicU32>,
 }
 
 impl Mixer {
-    pub(crate) fn new(hub: Arc<MediaHub>) -> Self {
+    pub(crate) fn new(hub: Arc<MediaHub>, volume: Arc<AtomicU32>) -> Self {
         Self {
             hub,
             playing: Vec::new(),
-            scratch: vec![0.0; MAX_DECODED],
+            volume,
         }
     }
 
@@ -468,6 +675,7 @@ impl Mixer {
         }
         self.sync_tracks();
         let base_step = RATE as f64 / rate.max(1) as f64;
+        let volume = f32::from_bits(self.volume.load(Ordering::Relaxed)).clamp(0.0, 4.0);
         for (_, playing) in &mut self.playing {
             let drift = playing
                 .track
@@ -478,13 +686,13 @@ impl Mixer {
             let step = base_step * drift;
             let end = playing.pos + frames_out as f64 * step;
             let needed = end.ceil() as usize + 1;
-            Self::top_up(playing, needed, &mut self.scratch);
+            Self::top_up(playing, needed);
             if playing.pcm.len() < needed {
                 // Whole buffer of silence; what is banked plays once there is enough.
                 playing.pos = 0.0;
                 continue;
             }
-            let gain = playing.track.gain();
+            let gain = playing.track.gain() * volume;
             let (left, right) = pan_gains(playing.track.pan());
             let mut pos = playing.pos;
             for f in 0..frames_out {
@@ -519,7 +727,7 @@ impl Mixer {
             if self.playing.iter().any(|(p, _)| *p == id) {
                 continue;
             }
-            if let Ok(decoder) = opus::Decoder::new(RATE, opus::Channels::Mono) {
+            if let Some(decoder) = new_decoder() {
                 self.playing.push((
                     id,
                     Playing {
@@ -527,48 +735,49 @@ impl Mixer {
                         decoder,
                         pcm: Default::default(),
                         pos: 0.0,
+                        fresh: Vec::with_capacity(MAX_DECODED),
                     },
                 ));
             }
         }
     }
 
-    fn top_up(playing: &mut Playing, needed: usize, scratch: &mut [f32]) {
-        while playing.pcm.len() < needed {
+    fn top_up(playing: &mut Playing, needed: usize) {
+        loop {
+            let before = playing.pcm.len();
+            if playing.decoder.drain(&mut playing.pcm) > 0 {
+                playing.fresh.clear();
+                playing.fresh.extend(playing.pcm.range(before..));
+                playing.track.meter(&playing.fresh);
+            }
+            if playing.pcm.len() + playing.decoder.in_flight() >= needed {
+                return;
+            }
             let pull = playing
                 .track
                 .jitter
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pull();
-            let decoded = match pull {
-                Pull::Frame(bytes) => playing
-                    .decoder
-                    .decode_float(&bytes, scratch, false)
-                    .unwrap_or(0),
+            match pull {
+                Pull::Frame(bytes) => playing.decoder.push(Packet::Data(&bytes)),
                 // The next frame's FEC data reconstructs this one; without it, the decoder
                 // extrapolates from what it last heard.
-                Pull::Lost { next: Some(bytes) } => playing
-                    .decoder
-                    .decode_float(&bytes, scratch, true)
-                    .unwrap_or(0),
-                Pull::Lost { next: None } => playing
-                    .decoder
-                    .decode_float(&[], scratch, false)
-                    .unwrap_or(0),
+                Pull::Lost { next: Some(bytes) } => playing.decoder.push(Packet::Fec(&bytes)),
+                Pull::Lost { next: None } => playing.decoder.push(Packet::Lost),
                 Pull::Idle => {
                     playing.track.level.store(0f32.to_bits(), Ordering::Relaxed);
                     return;
                 }
-            };
-            if decoded == 0 {
+            }
+            // An asynchronous decoder answers on a later task: what was just pushed cannot
+            // be drained now, and pushing until `needed` is covered by in-flight samples is
+            // what the loop condition does.
+            if playing.decoder.in_flight() > 0
+                && playing.pcm.len() + playing.decoder.in_flight() >= needed
+            {
                 return;
             }
-            playing
-                .track
-                .level
-                .store(rms(&scratch[..decoded]).to_bits(), Ordering::Relaxed);
-            playing.pcm.extend(&scratch[..decoded]);
         }
     }
 }
@@ -577,163 +786,6 @@ impl Mixer {
 fn pan_gains(pan: f32) -> (f32, f32) {
     let angle = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
     (angle.cos(), angle.sin())
-}
-
-// -- cpal ----------------------------------------------------------------------------------
-
-/// Samples from the capture callback, and a way to wait for them.
-#[derive(Default)]
-struct MicBuffer {
-    samples: Mutex<std::collections::VecDeque<f32>>,
-    arrived: Condvar,
-}
-
-/// The default input device, mono, at whatever rate it prefers.
-pub struct Microphone {
-    rate: u32,
-    buffer: Arc<MicBuffer>,
-    _keep: std::sync::mpsc::Sender<()>,
-}
-
-/// How much capture may bank before the reader is behind: three encoder frames. More is
-/// sender-side latency that never comes back.
-const MIC_BACKLOG_FRAMES: usize = 3;
-
-impl Microphone {
-    /// Opens the default input device. The stream lives on its own thread until this is dropped.
-    pub fn default_device() -> Result<Self, String> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("no input device")?;
-        let config = device.default_input_config().map_err(|e| e.to_string())?;
-        let rate = config.sample_rate();
-        let channels = config.channels() as usize;
-        let buffer = Arc::new(MicBuffer::default());
-        let sink = buffer.clone();
-        let cap = (rate as usize / 50) * MIC_BACKLOG_FRAMES;
-        let (keep, gone) = std::sync::mpsc::channel::<()>();
-        let (ready, started) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("bevy_iroh-mic".into())
-            .spawn(move || {
-                let stream = device.build_input_stream(
-                    config.config(),
-                    move |data: &[f32], _| {
-                        {
-                            let mut b = sink.samples.lock().unwrap_or_else(|e| e.into_inner());
-                            for frame in data.chunks(channels) {
-                                b.push_back(frame.iter().sum::<f32>() / channels as f32);
-                            }
-                            while b.len() > cap {
-                                b.pop_front();
-                            }
-                        }
-                        sink.arrived.notify_one();
-                    },
-                    |e| tracing::warn!("bevy_iroh: microphone: {e}"),
-                    None,
-                );
-                let stream = match stream.and_then(|s| s.play().map(|_| s)) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = ready.send(Err(e.to_string()));
-                        return;
-                    }
-                };
-                let _ = ready.send(Ok(()));
-                // Parked until the `Microphone` is dropped.
-                let _ = gone.recv();
-                drop(stream);
-            })
-            .map_err(|e| e.to_string())?;
-        started
-            .recv()
-            .map_err(|_| "microphone thread died".to_string())??;
-        Ok(Self {
-            rate,
-            buffer,
-            _keep: keep,
-        })
-    }
-}
-
-impl AudioSource for Microphone {
-    fn sample_rate(&self) -> u32 {
-        self.rate
-    }
-
-    /// Waits up to 20 ms for the device rather than polling.
-    fn read(&mut self, out: &mut [f32]) -> usize {
-        let mut b = self
-            .buffer
-            .samples
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if b.is_empty() {
-            let (guard, _) = self
-                .buffer
-                .arrived
-                .wait_timeout(b, Duration::from_millis(20))
-                .unwrap_or_else(|e| e.into_inner());
-            b = guard;
-        }
-        let n = out.len().min(b.len());
-        for s in out.iter_mut().take(n) {
-            *s = b.pop_front().unwrap_or(0.0);
-        }
-        n
-    }
-}
-
-/// The default output device.
-pub struct Speaker;
-
-impl AudioOutput for Speaker {
-    fn start(
-        self: Box<Self>,
-        mixer: Arc<Mutex<Mixer>>,
-        stop: Arc<AtomicBool>,
-    ) -> Result<(), String> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or("no output device")?;
-        let config = device.default_output_config().map_err(|e| e.to_string())?;
-        let rate = config.sample_rate();
-        let channels = config.channels() as usize;
-        tracing::info!("bevy_iroh: speaker at {rate} Hz, {channels} channels");
-        let (ready, started) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("bevy_iroh-speaker".into())
-            .spawn(move || {
-                let stream = device.build_output_stream(
-                    config.config(),
-                    move |data: &mut [f32], _| {
-                        mixer
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .render(data, channels, rate);
-                    },
-                    |e| tracing::warn!("bevy_iroh: speaker: {e}"),
-                    None,
-                );
-                let stream = match stream.and_then(|s| s.play().map(|_| s)) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = ready.send(Err(e.to_string()));
-                        return;
-                    }
-                };
-                let _ = ready.send(Ok(()));
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                drop(stream);
-            })
-            .map_err(|e| e.to_string())?;
-        started
-            .recv()
-            .map_err(|_| "speaker thread died".to_string())?
-    }
 }
 
 #[cfg(test)]
@@ -753,6 +805,16 @@ mod tests {
         }
         assert!((out.len() as i64 - 48_000).abs() < 4, "{}", out.len());
         assert!(out.iter().all(|s| (s - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn framer_cuts_exact_frames() {
+        let mut f = Framer::new(48_000);
+        f.push(&[0.1; 500]);
+        assert!(f.next_frame().is_none());
+        f.push(&[0.1; 500]);
+        assert_eq!(f.next_frame().map(|v| v.len()), Some(FRAME));
+        assert!(f.next_frame().is_none());
     }
 
     #[test]

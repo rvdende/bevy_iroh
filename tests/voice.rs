@@ -10,7 +10,7 @@ use std::{
 
 use bevy::{asset::AssetPlugin, prelude::*};
 use bevy_iroh::{
-    media::{AudioOutput, AudioSource, MicrophoneChoice, Mixer, SpeakerChoice},
+    media::{AudioOutput, AudioSource, Mixer, Running},
     prelude::*,
 };
 
@@ -41,21 +41,19 @@ impl AudioSource for Tone {
 struct Capture(Arc<Mutex<Vec<f32>>>);
 
 impl AudioOutput for Capture {
-    fn start(
-        self: Box<Self>,
-        mixer: Arc<Mutex<Mixer>>,
-        stop: Arc<AtomicBool>,
-    ) -> Result<(), String> {
+    fn start(self: Box<Self>, mixer: Arc<Mutex<Mixer>>) -> Result<Running, String> {
         let sink = self.0;
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
         std::thread::spawn(move || {
             let mut buf = vec![0f32; 480 * 2];
-            while !stop.load(Ordering::Relaxed) {
+            while !flag.load(Ordering::Relaxed) {
                 mixer.lock().unwrap().render(&mut buf, 2, 48_000);
                 sink.lock().unwrap().extend_from_slice(&buf);
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        Ok(())
+        Ok(Running::flag(stop))
     }
 }
 

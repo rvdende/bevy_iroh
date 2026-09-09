@@ -3,10 +3,7 @@
 use std::time::{Duration, Instant};
 
 use bevy::{asset::AssetPlugin, prelude::*};
-use bevy_iroh::{
-    media::{MicrophoneChoice, SpeakerChoice},
-    prelude::*,
-};
+use bevy_iroh::prelude::*;
 
 fn app(name: &str) -> App {
     let mut app = App::new();

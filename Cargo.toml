@@ -1,6 +1,6 @@
 [package]
 name = "bevy_iroh"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
@@ -13,10 +13,35 @@ categories = ["game-development", "network-programming"]
 
 [features]
 default = []
-## Voice over the same endpoint: `Voice` on a shared entity publishes the microphone, remote
-## voices play back spatially. Pulls in cpal and libopus (built from source with cmake).
-media = ["dep:cpal", "dep:opus", "dep:openh264", "dep:bytes", "bevy/bevy_asset", "bevy/bevy_image"]
-## A `bevy_v4l2` webcam as a `VideoSource`: `VideoInput::new(feed.capture.color_tap())`. Linux.
+## Voice and video over the same endpoint: `Voice` on a shared entity publishes the microphone,
+## remote voices play back spatially; `VideoFeed` does the same for a picture. On a desktop this
+## pulls in cpal, libopus and openh264 (built from source with cmake); in a page it is Web Audio
+## and WebCodecs.
+media = [
+    "dep:cpal",
+    "dep:opus",
+    "dep:openh264",
+    "dep:bytes",
+    "bevy/bevy_asset",
+    "bevy/bevy_image",
+    "dep:web-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+]
+## Ready-made Bevy UI for `media`: microphone, speaker and camera pickers, a level meter, a mute
+## button, and a meter that floats over every remote voice.
+ui = [
+    "media",
+    "bevy/bevy_ui",
+    "bevy/bevy_ui_render",
+    "bevy/ui_picking",
+    "bevy/bevy_text",
+    "bevy/default_font",
+    "bevy/bevy_pbr",
+    "bevy/bevy_mesh",
+]
+## Cameras through `bevy_v4l2`: `VideoInput::camera()` opens the one in `MediaSettings`. Linux.
 v4l2 = ["media", "dep:bevy_v4l2"]
 ## What only a browser has: an identity in localStorage and the ticket from the page URL. The
 ## core transport runs on wasm32 without this.
@@ -46,11 +71,31 @@ bevy_v4l2 = { version = "0.3", optional = true, default-features = false, featur
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros"] }
 web-time = "1"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window", "Storage", "Location", "Navigator", "Document", "Element", "HtmlElement",
+    "HtmlVideoElement", "HtmlMediaElement", "HtmlCanvasElement", "CanvasRenderingContext2d",
+    "ImageData", "EventTarget",
+    "MediaDevices", "MediaStream", "MediaStreamTrack", "MediaStreamConstraints",
+    "MediaTrackConstraints", "MediaDeviceInfo", "MediaDeviceKind",
+    "AudioContext", "AudioContextOptions", "AudioContextState", "BaseAudioContext", "AudioNode",
+    "AudioParam", "AudioDestinationNode", "AudioBuffer", "GainNode", "ScriptProcessorNode",
+    "AudioProcessingEvent", "MediaStreamAudioSourceNode",
+    "VideoEncoder", "VideoEncoderConfig", "VideoEncoderInit", "VideoEncoderEncodeOptions",
+    "LatencyMode", "VideoDecoder", "VideoDecoderConfig", "VideoDecoderInit", "VideoFrame",
+    "VideoFrameInit", "VideoFrameBufferInit", "VideoFrameCopyToOptions", "VideoPixelFormat", "PlaneLayout",
+    "EncodedVideoChunk", "EncodedVideoChunkInit", "EncodedVideoChunkType", "DomRectReadOnly",
+    "DomRectInit",
+    "AudioEncoder", "AudioEncoderConfig", "AudioEncoderInit", "AudioDecoder",
+    "AudioDecoderConfig", "AudioDecoderInit", "AudioData", "AudioDataInit",
+    "AudioDataCopyToOptions", "AudioSampleFormat", "EncodedAudioChunk", "EncodedAudioChunkInit",
+    "EncodedAudioChunkType",
+] }
 
 [package.metadata.docs.rs]
-features = ["media", "v4l2"]
+features = ["media", "ui", "v4l2"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The cube example puts the room's status in the tab title; the wasm test logs to the console.
@@ -67,8 +112,12 @@ rand = "0.10"
 opt-level = 3
 
 [[example]]
-name = "conference"
-required-features = ["media"]
+name = "voice"
+required-features = ["ui"]
+
+[[example]]
+name = "webcam"
+required-features = ["ui"]
 
 [[test]]
 name = "voice"
@@ -91,4 +140,15 @@ debug = false
 strip = "symbols"
 
 [profile.wasm-test.package."*"]
+opt-level = 3
+
+# What `scripts/web.sh` builds: the same, with this crate's own code optimised a little, since
+# the mixer and the pixel loops run on the page's one thread.
+[profile.web]
+inherits = "dev"
+debug = false
+strip = "symbols"
+opt-level = 1
+
+[profile.web.package."*"]
 opt-level = 3

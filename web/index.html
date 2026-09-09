@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>bevy_iroh cube</title>
+  <title>bevy_iroh</title>
   <style>
     html, body { margin: 0; height: 100%; background: #202428; overflow: hidden; }
     canvas { display: block; width: 100vw; height: 100vh; }
@@ -10,8 +10,8 @@
 </head>
 <body>
   <script type="module">
-    // Built by `scripts/web.sh`: wasm-bindgen output of the cube example.
-    import init from "./cube.js";
+    // Built by `scripts/web.sh <example>`: wasm-bindgen output of that example.
+    import init from "./app.js";
     init().catch((e) => {
       // winit uses an exception for control flow once the event loop is running.
       if (!String(e).includes("Using exceptions for control flow")) {
