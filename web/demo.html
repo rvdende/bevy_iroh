@@ -27,19 +27,16 @@
   <header>
     <a href="../">bevy_iroh</a>
     <b>EXAMPLE</b>
-    <span class="hint">The address bar is the invitation once the room is up: copy it and send it. A desktop joins with the ticket in it.</span>
+    <span class="hint">Open in a second browser or share the link to try it with someone.</span>
   </header>
   <div class="stage"><canvas id="bevy"></canvas></div>
   <section>
     <div class="howto">
-      <p><b>You are in a room of your own.</b> The address bar holds the invitation: anyone who opens
-        this URL joins you, so try it in another browser, on your phone, or send it to someone.
-        A desktop joins with the ticket in it, too.</p>
-      <p><button id="share">Share this room</button> <span id="shared"></span></p>
-      <p><b>Arrow keys</b> move you. <b>Enter</b> opens the chat, Enter sends, Escape closes. <b>M</b>
-        mutes. Top right: mute, your microphone level, the camera, and the device pickers. Each
-        person is a sphere, with their picture and their words over it, and their voice comes from
-        where they stand.</p>
+      <p>This page hosts a room. The link in the address bar is the invite, so open it in a second
+        browser tab, on your phone, or send it to a friend and they will show up here.
+        <button id="share">Copy invite link</button> <span id="shared"></span></p>
+      <p>Arrow keys to move, Enter to type a message, M to mute. Mic, camera and device settings are
+        top right. Voices are positional, so walk up to someone to hear them better.</p>
     </div>
     <h2><code>examples/EXAMPLE.rs</code></h2>
     <pre><code id="source" class="language-rust">loading…</code></pre>
@@ -51,12 +48,12 @@
     document.getElementById("share").addEventListener("click", async () => {
       const out = document.getElementById("shared");
       const url = location.href;
-      if (!url.includes("join=")) { out.textContent = "the room is still starting, try again in a moment"; return; }
+      if (!url.includes("join=")) { out.textContent = "still connecting, try again in a second"; return; }
       if (navigator.share) {
         try { await navigator.share({ title: "bevy_iroh EXAMPLE", url }); out.textContent = "shared"; return; } catch (e) {}
       }
-      try { await navigator.clipboard.writeText(url); out.textContent = "link copied, paste it anywhere"; }
-      catch (e) { out.textContent = "copy the address bar"; }
+      try { await navigator.clipboard.writeText(url); out.textContent = "copied"; }
+      catch (e) { out.textContent = "could not copy, grab it from the address bar"; }
     });
     fetch("source.rs").then(r => r.text()).then(src => {
       const el = document.getElementById("source");

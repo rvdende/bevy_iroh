@@ -44,11 +44,11 @@
       <a class="demo" href="voice/"><b>voice</b>Voice only, with a mute button, a meter and device pickers. <small>Asks for a microphone.</small></a>
       <a class="demo" href="cube/"><b>cube</b>The hello world: a cube each, driven with the arrow keys. <small>Nothing to allow.</small></a>
     </div>
-    <p class="note">Open a demo and its address bar becomes the invitation: copy the URL and send it,
-      and whoever opens it joins your room. Two tabs of your own work too. A desktop peer joins
-      with the ticket in that URL: <code>cargo run --example webcam --features ui,webrtc,v4l2 -- &lt;ticket&gt;</code>.
-      Browser peers talk to each other and to desktops over hole-punched WebRTC data channels;
-      the first few seconds before that link is up go through a relay.</p>
+    <p class="note">Each demo hosts a room and puts the invite link in the address bar. Open it in a
+      second tab or on another device to see it work. A native build can join the same room with
+      <code>cargo run --example webcam --features ui,webrtc,v4l2 -- &lt;ticket&gt;</code>, using the
+      ticket from that link. Browsers connect to each other and to desktops over WebRTC; until that
+      link is up, traffic goes through a relay.</p>
     <article id="readme">Loading the README…</article>
   </main>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
