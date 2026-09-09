@@ -63,13 +63,23 @@ fn setup(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.25, 0.3, 0.35))),
     ));
+    // A sun with shadows, so everyone stands on the floor rather than floating over it.
     commands.spawn((
-        DirectionalLight::default(),
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DirectionalLight {
+            illuminance: 12_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(5.0, 9.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+
     // The listener rides the camera: a voice on the left of the screen is heard on the left.
     commands.spawn((
         Camera3d::default(),
+        AmbientLight {
+            brightness: 250.0,
+            ..default()
+        },
         AudioListener,
         Transform::from_xyz(0.0, 6.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
