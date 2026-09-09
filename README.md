@@ -137,7 +137,11 @@ one unreliable and unordered for the voice frames and one reliable for video and
 carrying the same bytes the QUIC path carries. The browser's own ICE does the hole punching;
 `str0m` is the desktop side, on the iroh runtime, with a STUN binding for the public address.
 Signalling is one typed message over the room, so there is no extra server. When the link is
-up, media to and from that peer moves onto it; when it drops, media moves back to QUIC, and
+up, everything to and from that peer moves onto it: voice and video, and also replication,
+presence and typed messages, which go on a third reliable channel of their own so a video
+keyframe never delays a move. Room broadcasts still go to gossip as well, and receivers drop
+the copy that arrives second, so the link only ever wins the race. `Received::via` says
+`Via::WebRtc` for what came that way. When the link drops, everything moves back to QUIC and
 the page offers again. `MediaPath` on each `Peer` and remote media entity says which path is
 in use, and `RtcSettings` holds the STUN servers and whether this node offers. Desktops do not
 offer to desktops by default, since a QUIC dial already hole punches; the two-app test turns

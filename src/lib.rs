@@ -24,7 +24,7 @@ pub mod web;
 pub use iroh;
 pub use iroh_gossip::proto::TopicId;
 pub use net::{
-    Relays, RoomTicket, Via,
+    FastPaths, Relays, RoomTicket, Via,
     stats::{Link, Stats},
 };
 pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};

@@ -39,6 +39,9 @@ pub use ticket::RoomTicket;
 /// that the difference should never be guessed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Via {
+    /// A WebRTC data channel to that peer (the `webrtc` feature): hole-punched, and shared
+    /// with its voice and video.
+    WebRtc,
     Gossip,
     Direct,
 }
@@ -110,7 +113,81 @@ pub struct Config {
     /// Extra ALPNs on the router. How media, or anything else that is a stream rather than a
     /// message, rides the same endpoint.
     pub protocols: Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>,
+    /// Peers reachable some other way than iroh: see [`FastPaths`].
+    pub fast_paths: Arc<FastPaths>,
 }
+
+/// Another way to reach a peer than gossip or a dial: a WebRTC data channel, today. A frame
+/// broadcast to a room also goes to every fast path, and a frame for one peer goes only there
+/// when there is one. Receivers drop the copy that arrives second, so gossip may keep
+/// forwarding as it does and the fast path merely wins the race.
+#[derive(Default)]
+pub struct FastPaths {
+    /// Per peer: hand a signed frame over; `false` when the path is gone.
+    links: std::sync::Mutex<HashMap<EndpointId, Arc<dyn Fn(&[u8]) -> bool + Send + Sync>>>,
+    /// Where frames that arrived on a fast path go: the node's verify-and-deliver.
+    inbound: std::sync::Mutex<Option<Arc<dyn Fn(Vec<u8>) + Send + Sync>>>,
+}
+
+impl FastPaths {
+    pub fn add(&self, peer: EndpointId, send: impl Fn(&[u8]) -> bool + Send + Sync + 'static) {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer, Arc::new(send));
+    }
+
+    pub fn remove(&self, peer: EndpointId) {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&peer);
+    }
+
+    pub fn has(&self, peer: EndpointId) -> bool {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&peer)
+    }
+
+    fn all(&self) -> Vec<(EndpointId, Arc<dyn Fn(&[u8]) -> bool + Send + Sync>)> {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
+    fn one(&self, peer: EndpointId) -> Option<Arc<dyn Fn(&[u8]) -> bool + Send + Sync>> {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&peer)
+            .cloned()
+    }
+
+    /// A signed frame that arrived on a fast path.
+    pub fn deliver(&self, frame: Vec<u8>) {
+        let sink = self
+            .inbound
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(sink) = sink {
+            sink(frame);
+        }
+    }
+
+    fn set_inbound(&self, sink: impl Fn(Vec<u8>) + Send + Sync + 'static) {
+        *self.inbound.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(sink));
+    }
+}
+
+/// Frames remembered for duplicate detection. A frame can arrive on a fast path and again
+/// through gossip; the second is dropped.
+const SEEN: usize = 4096;
 
 /// State shared by every task in the node.
 pub struct Ctx {
@@ -120,6 +197,20 @@ pub struct Ctx {
     topics: RwLock<HashMap<TopicId, Arc<TopicState>>>,
     /// Addresses we have been told about, so a direct dial can skip discovery.
     addrs: RwLock<HashMap<EndpointId, EndpointAddr>>,
+    fast_paths: Arc<FastPaths>,
+    seen: std::sync::Mutex<(
+        std::collections::VecDeque<u64>,
+        std::collections::HashSet<u64>,
+    )>,
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 pub struct TopicState {
@@ -180,6 +271,22 @@ impl Ctx {
             .cloned()
     }
 
+    /// Whether this exact frame is new. The signature makes every frame unique.
+    fn first_sight(&self, bytes: &[u8]) -> bool {
+        let key = fnv1a(bytes);
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.1.insert(key) {
+            return false;
+        }
+        seen.0.push_back(key);
+        if seen.0.len() > SEEN
+            && let Some(old) = seen.0.pop_front()
+        {
+            seen.1.remove(&old);
+        }
+        true
+    }
+
     fn sign(
         &self,
         topic: TopicId,
@@ -196,6 +303,9 @@ impl Ctx {
         let (from, envelope) = proto::decode(bytes)?;
         // Our own broadcasts come back through the swarm.
         if from == self.me() {
+            return Ok(None);
+        }
+        if !self.first_sight(bytes) {
             return Ok(None);
         }
         let Some(state) = self.topic(&envelope.topic) else {
@@ -219,6 +329,12 @@ impl Ctx {
             )?;
             return match via {
                 Via::Direct => Ok(Some(frame)),
+                Via::WebRtc => {
+                    if let Some(send) = self.fast_paths.one(from) {
+                        send(&frame);
+                    }
+                    Ok(None)
+                }
                 Via::Gossip => {
                     state.sender.broadcast(frame.into()).await?;
                     Ok(None)
@@ -268,7 +384,21 @@ impl Node {
             events: events_tx,
             topics: RwLock::new(HashMap::new()),
             addrs: RwLock::new(HashMap::new()),
+            fast_paths: config.fast_paths.clone(),
+            seen: Default::default(),
         });
+        // Frames off a fast path go through the same verification as everything else.
+        {
+            let ctx = ctx.clone();
+            config.fast_paths.set_inbound(move |frame| {
+                let ctx = ctx.clone();
+                n0_future::task::spawn(async move {
+                    if let Err(e) = ctx.handle_frame(&frame, Via::WebRtc).await {
+                        tracing::debug!("bevy_iroh: fast path frame: {e:#}");
+                    }
+                });
+            });
+        }
         let mut router = Router::builder(endpoint)
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(direct::ALPN, direct::DirectHandler::new(ctx.clone()));
@@ -420,6 +550,10 @@ impl Topic {
         let frame = self
             .ctx
             .sign(self.state.topic, Audience::Everyone, kind, body)?;
+        // Fast paths first: whoever has one gets it now and drops gossip's copy later.
+        for (_, send) in self.ctx.fast_paths.all() {
+            send(&frame);
+        }
         self.state
             .sender
             .broadcast(frame.into())
@@ -432,13 +566,27 @@ impl Topic {
         self.broadcast(P::KIND, payload.to_body()?).await
     }
 
-    /// Dial one peer and deliver, returning its reply if it wrote one.
+    /// Deliver to one peer, over its fast path if it has one and a dial otherwise, returning
+    /// a reply if the dial got one.
     pub async fn send_to(
         &self,
         to: EndpointId,
         kind: Kind,
         body: Vec<u8>,
     ) -> Result<Option<Vec<u8>>> {
+        let frame = self
+            .ctx
+            .sign(self.state.topic, Audience::Only(vec![to]), kind, body)?;
+        if let Some(send) = self.ctx.fast_paths.one(to)
+            && send(&frame)
+        {
+            return Ok(None);
+        }
+        direct::request(&self.ctx.endpoint, self.ctx.addr_for(to), &frame).await
+    }
+
+    /// Dial one peer and deliver, returning its reply if it wrote one.
+    async fn dial(&self, to: EndpointId, kind: Kind, body: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let frame = self
             .ctx
             .sign(self.state.topic, Audience::Only(vec![to]), kind, body)?;
@@ -450,7 +598,7 @@ impl Topic {
         let nonce: u64 = rand::random();
         let sent_at = proto::now_ms();
         let reply = self
-            .send_to(to, Kind::PING, proto::Ping { nonce }.to_body()?)
+            .dial(to, Kind::PING, proto::Ping { nonce }.to_body()?)
             .await?
             .context("peer accepted the ping but did not answer it")?;
         let (_, envelope) = proto::decode(&reply)?;

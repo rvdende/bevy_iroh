@@ -10,11 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy::{asset::AssetPlugin, prelude::*};
+use bevy::{asset::AssetPlugin, ecs::system::RunSystemOnce, prelude::*};
 use bevy_iroh::{
     media::{AudioOutput, AudioSource, MicrophoneChoice, Mixer, Running, SpeakerChoice},
     prelude::*,
 };
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Chat(String);
 
 struct Tone {
     started: Instant,
@@ -72,6 +76,7 @@ fn app(name: &str, settings: MediaSettings, initiate: bool) -> App {
                 .with_relays(Relays::Disabled)
                 .with_display_name(name),
         ))
+        .add_net_message::<Chat>()
         .init_asset::<Image>();
     app
 }
@@ -184,6 +189,44 @@ fn a_tone_crosses_a_data_channel() {
         let heard = heard.lock().unwrap();
         let fresh = &heard[mark.max(heard.len().saturating_sub(48_000 / 2))..];
         fresh.len() >= 48_000 / 4 && rms(fresh) > 0.05
+    });
+
+    // The room's own traffic takes the link too: a move arrives, and a message says it
+    // came that way.
+    let mine = alice
+        .world_mut()
+        .query_filtered::<Entity, (With<Voice>, Without<Remote>)>()
+        .single(alice.world())
+        .unwrap();
+    alice
+        .world_mut()
+        .get_mut::<Transform>(mine)
+        .unwrap()
+        .translation
+        .x = 7.0;
+    wait(&mut alice, &mut bob, "the move", |b| {
+        b.world_mut()
+            .query_filtered::<&Glide, With<Remote>>()
+            .iter(b.world())
+            .any(|g| (g.target().translation.x - 7.0).abs() < 1e-3)
+    });
+    let room = alice
+        .world_mut()
+        .query_filtered::<Entity, With<Room>>()
+        .single(alice.world())
+        .unwrap();
+    let bob_id = bob.world().resource::<Iroh>().id();
+    alice
+        .world_mut()
+        .run_system_once(move |net: NetSender| {
+            net.send_to(room, bob_id, &Chat("hi".into()));
+        })
+        .unwrap();
+    wait(&mut alice, &mut bob, "the chat over webrtc", |b| {
+        b.world_mut()
+            .resource_mut::<Messages<Received<Chat>>>()
+            .drain()
+            .any(|m| m.msg == Chat("hi".into()) && m.via == Via::WebRtc)
     });
 }
 

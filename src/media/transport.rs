@@ -68,14 +68,19 @@ enum Control {
 
 /// The first byte of a WebRTC message carrying a control frame.
 const TAG_CONTROL: u8 = 3;
+/// The first byte of a WebRTC message carrying a signed room frame: replication, presence,
+/// typed messages, the same bytes gossip would carry.
+const TAG_FRAME: u8 = 4;
 
 /// What goes out on a WebRTC link.
 pub enum Outbound {
     /// On the unreliable channel.
     Audio(Bytes),
-    /// On the reliable channel.
+    /// On the reliable video channel.
     Video(Bytes),
     Control(Bytes),
+    /// On the reliable frames channel, apart from video so a keyframe never delays a move.
+    Frame(Bytes),
 }
 
 /// A WebRTC data-channel pair to one peer. `out` hands bytes to whatever drives the
@@ -137,8 +142,9 @@ impl Link {
 }
 
 /// State shared by the Bevy side, the protocol handler, the audio threads and the sessions.
-#[derive(Default)]
 pub struct MediaHub {
+    /// The node's fast paths: a WebRTC link is one, for everything the room says.
+    fast_paths: Arc<crate::net::FastPaths>,
     /// Tracks this node publishes, and whether they are muted.
     published: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     /// Who subscribed to each of my tracks.
@@ -200,7 +206,27 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+impl Default for MediaHub {
+    fn default() -> Self {
+        Self::new(Arc::new(crate::net::FastPaths::default()))
+    }
+}
+
 impl MediaHub {
+    pub fn new(fast_paths: Arc<crate::net::FastPaths>) -> Self {
+        Self {
+            fast_paths,
+            published: Default::default(),
+            subscribers: Default::default(),
+            rtc_links: Default::default(),
+            remote: Default::default(),
+            remote_video: Default::default(),
+            keyframe_wanted: Default::default(),
+            sessions: Default::default(),
+            dead: Default::default(),
+        }
+    }
+
     // -- publishing -------------------------------------------------------------------------
 
     /// Start publishing `track`. Returns its mute flag, shared with the encoder.
@@ -287,6 +313,13 @@ impl MediaHub {
     /// marked for subscribing again, which lands on the link.
     pub async fn add_rtc_link(self: &Arc<Self>, link: Arc<RtcLink>) {
         let peer = link.peer;
+        let frames = link.clone();
+        self.fast_paths.add(peer, move |frame| {
+            let mut buf = Vec::with_capacity(1 + frame.len());
+            buf.push(TAG_FRAME);
+            buf.extend_from_slice(frame);
+            frames.send(Outbound::Frame(Bytes::from(buf)))
+        });
         if let Some(old) = lock(&self.rtc_links).insert(peer, link) {
             old.alive.store(false, Ordering::Relaxed);
         }
@@ -314,6 +347,7 @@ impl MediaHub {
             }
             peer
         };
+        self.fast_paths.remove(peer);
         for links in lock(&self.subscribers).values_mut() {
             links.retain(|l| l.id() != link_id);
         }
@@ -356,6 +390,8 @@ impl MediaHub {
                 };
                 self.control(Link::Rtc(link.clone()), control);
             }
+            // The node verifies the signature; a link is a route, not a trust.
+            Some(&TAG_FRAME) => self.fast_paths.deliver(data[1..].to_vec()),
             _ => {}
         }
     }

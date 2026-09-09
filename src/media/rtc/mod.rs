@@ -307,9 +307,12 @@ fn peers_left(mut left: MessageReader<PeerLeft>, media: Res<Media>) {
     }
 }
 
-/// The two channels every link is made of.
+/// The three channels every link is made of: voice frames, unreliable; video groups and
+/// control, reliable; and the room's own frames, reliable and apart from video so a keyframe
+/// in flight never holds a move back.
 pub(crate) const AUDIO_CHANNEL: &str = "audio";
 pub(crate) const VIDEO_CHANNEL: &str = "video";
+pub(crate) const FRAMES_CHANNEL: &str = "frames";
 
 /// Bytes a reliable channel may hold unsent before video frames are refused. Past this the
 /// link is behind by more than a group, and the subscriber is better served by a fresh

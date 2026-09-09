@@ -317,9 +317,10 @@ impl Plugin for IrohPlugin {
         #[allow(unused_mut)]
         let mut protocols =
             std::mem::take(&mut *self.protocols.lock().unwrap_or_else(|e| e.into_inner()));
+        let fast_paths = Arc::new(net::FastPaths::default());
         #[cfg(feature = "media")]
         let hub = {
-            let hub = Arc::new(crate::media::MediaHub::default());
+            let hub = Arc::new(crate::media::MediaHub::new(fast_paths.clone()));
             protocols.push((
                 crate::media::ALPN.to_vec(),
                 Box::new(crate::media::transport::MediaHandler { hub: hub.clone() })
@@ -331,6 +332,7 @@ impl Plugin for IrohPlugin {
             secret_key: secret,
             relays: self.relays.clone(),
             protocols,
+            fast_paths,
         };
         match spawn(config, self.display_name.clone()) {
             Ok(iroh) => {

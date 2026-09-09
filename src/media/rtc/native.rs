@@ -25,7 +25,8 @@ use str0m::{
 use tokio::{net::UdpSocket, sync::mpsc};
 
 use super::{
-    AUDIO_CHANNEL, Outbox, RtcSettings, RtcSignal, SignalKind, VIDEO_BACKLOG, VIDEO_CHANNEL,
+    AUDIO_CHANNEL, FRAMES_CHANNEL, Outbox, RtcSettings, RtcSignal, SignalKind, VIDEO_BACKLOG,
+    VIDEO_CHANNEL,
 };
 use crate::{
     media::transport::{MediaHub, Outbound, RtcLink},
@@ -91,6 +92,7 @@ pub(crate) fn offer(
             protocol: String::new(),
         });
         api.add_channel(VIDEO_CHANNEL.into());
+        api.add_channel(FRAMES_CHANNEL.into());
         let Some((offer, pending)) = api.apply() else {
             return;
         };
@@ -271,6 +273,7 @@ async fn drive(
     }));
     let mut audio: Option<ChannelId> = None;
     let mut video: Option<ChannelId> = None;
+    let mut frames: Option<ChannelId> = None;
     let mut announced = false;
     let mut buf = vec![0u8; 2000];
     'run: loop {
@@ -285,9 +288,10 @@ async fn drive(
                         match label.as_str() {
                             AUDIO_CHANNEL => audio = Some(id),
                             VIDEO_CHANNEL => video = Some(id),
+                            FRAMES_CHANNEL => frames = Some(id),
                             _ => {}
                         }
-                        if audio.is_some() && video.is_some() && !announced {
+                        if audio.is_some() && video.is_some() && frames.is_some() && !announced {
                             announced = true;
                             hub.add_rtc_link(link.clone()).await;
                         }
@@ -325,6 +329,7 @@ async fn drive(
                 let (channel, bytes): (Option<ChannelId>, Bytes) = match message {
                     Outbound::Audio(b) => (audio, b),
                     Outbound::Video(b) | Outbound::Control(b) => (video, b),
+                    Outbound::Frame(b) => (frames, b),
                 };
                 if let Some(id) = channel && let Some(mut ch) = rtc.channel(id) {
                     if ch.buffered_amount() > VIDEO_BACKLOG && matches!(id, _ if Some(id) == video) {

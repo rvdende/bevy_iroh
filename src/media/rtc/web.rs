@@ -18,7 +18,8 @@ use web_sys::{
 };
 
 use super::{
-    AUDIO_CHANNEL, Outbox, RtcSettings, RtcSignal, SignalKind, VIDEO_BACKLOG, VIDEO_CHANNEL,
+    AUDIO_CHANNEL, FRAMES_CHANNEL, Outbox, RtcSettings, RtcSignal, SignalKind, VIDEO_BACKLOG,
+    VIDEO_CHANNEL,
 };
 use crate::{
     media::{
@@ -32,6 +33,7 @@ struct WebPeer {
     pc: RtcPeerConnection,
     audio: Option<RtcDataChannel>,
     video: Option<RtcDataChannel>,
+    frames: Option<RtcDataChannel>,
     link: Arc<RtcLink>,
     announced: bool,
     hub: Arc<MediaHub>,
@@ -67,6 +69,7 @@ fn sender(peer: EndpointId) -> impl Fn(Outbound) -> bool + Send + Sync + 'static
                 Outbound::Audio(b) => (&p.audio, b, false),
                 Outbound::Video(b) => (&p.video, b, true),
                 Outbound::Control(b) => (&p.video, b, false),
+                Outbound::Frame(b) => (&p.frames, b, false),
             };
             let Some(channel) = channel else {
                 return false;
@@ -134,6 +137,7 @@ fn new_peer(
                 pc: pc.clone(),
                 audio: None,
                 video: None,
+                frames: None,
                 link,
                 announced: false,
                 hub,
@@ -158,7 +162,7 @@ fn attach(peer: EndpointId, channel: RtcDataChannel) {
                 c.as_ref()
                     .is_some_and(|c| c.ready_state() == RtcDataChannelState::Open)
             };
-            if open(&p.audio) && open(&p.video) && !p.announced {
+            if open(&p.audio) && open(&p.video) && open(&p.frames) && !p.announced {
                 p.announced = true;
                 Some((p.link.clone(), p.hub.clone()))
             } else {
@@ -205,6 +209,7 @@ fn attach(peer: EndpointId, channel: RtcDataChannel) {
         match label.as_str() {
             AUDIO_CHANNEL => p.audio = Some(channel),
             VIDEO_CHANNEL => p.video = Some(channel),
+            FRAMES_CHANNEL => p.frames = Some(channel),
             _ => return,
         }
         p._closures.extend([on_open, on_message, on_close]);
@@ -246,6 +251,7 @@ pub(crate) fn offer(
         pc.create_data_channel_with_data_channel_dict(AUDIO_CHANNEL, &audio_init),
     );
     attach(peer, pc.create_data_channel(VIDEO_CHANNEL));
+    attach(peer, pc.create_data_channel(FRAMES_CHANNEL));
     wasm_bindgen_futures::spawn_local(async move {
         let result: Result<(), String> = async {
             let offer = JsFuture::from(pc.create_offer()).await.map_err(describe)?;
@@ -358,7 +364,10 @@ pub(crate) fn close(peer: EndpointId, hub: &Arc<MediaHub>) {
     gone.pc.set_onicecandidate(None);
     gone.pc.set_oniceconnectionstatechange(None);
     gone.pc.set_ondatachannel(None);
-    for channel in [&gone.audio, &gone.video].into_iter().flatten() {
+    for channel in [&gone.audio, &gone.video, &gone.frames]
+        .into_iter()
+        .flatten()
+    {
         channel.set_onopen(None);
         channel.set_onmessage(None);
         channel.set_onclose(None);
