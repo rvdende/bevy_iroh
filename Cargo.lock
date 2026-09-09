@@ -1962,6 +1962,8 @@ dependencies = [
 [[package]]
 name = "bevy_v4l2"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43027c09eaa0f5869256ee57a7d1aa971df724cdcb9d08edb6c6438c44f2ad22"
 dependencies = [
  "bevy",
  "crossbeam-channel",

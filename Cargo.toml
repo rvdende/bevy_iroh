@@ -140,10 +140,6 @@ required-features = ["media"]
 name = "webrtc"
 required-features = ["webrtc"]
 
-# Until bevy_v4l2 0.3 is on crates.io. Stripped from the published manifest.
-[patch.crates-io]
-bevy_v4l2 = { path = "../bevy_v4l2" }
-
 # The browser test: `dev` without debug info, which is most of a wasm binary's size and all
 # of what makes a headless browser choke on it. `cargo test --profile wasm-test --target
 # wasm32-unknown-unknown --features wasm --test wasm`.
