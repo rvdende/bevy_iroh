@@ -79,7 +79,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
-    "Window", "Storage", "Location", "Navigator", "Document", "Element", "HtmlElement",
+    "Window", "Storage", "Location", "History", "Navigator", "Document", "Element", "HtmlElement",
     "HtmlVideoElement", "HtmlMediaElement", "HtmlCanvasElement", "CanvasRenderingContext2d",
     "ImageData", "EventTarget",
     "MediaDevices", "MediaStream", "MediaStreamTrack", "MediaStreamConstraints",
@@ -165,3 +165,13 @@ opt-level = 1
 
 [profile.web.package."*"]
 opt-level = 3
+
+# The published demos (`scripts/site.sh`, the Pages workflow): as small as they will go, since
+# every visitor downloads the whole thing. Slow to build; not for iterating.
+[profile.pages]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

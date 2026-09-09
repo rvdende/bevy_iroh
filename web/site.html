@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bevy_iroh</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 16px/1.55 system-ui, sans-serif; background: #202428; color: #e6e6ea; }
+    main { max-width: 52rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    a { color: #6fd38a; }
+    pre { background: #15171a; padding: .8rem 1rem; overflow-x: auto; border-radius: 6px; }
+    code { font-size: .92em; }
+    :not(pre) > code { background: #15171a; padding: .1em .35em; border-radius: 4px; }
+    table { border-collapse: collapse; }
+    td, th { border: 1px solid #3a3e44; padding: .35rem .6rem; vertical-align: top; }
+    .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; margin: 1.5rem 0 2.5rem; }
+    .demo { display: block; padding: 1rem 1.1rem; background: #15171a; border-radius: 8px; text-decoration: none; color: inherit; border: 1px solid #2c3036; }
+    .demo:hover { border-color: #6fd38a; }
+    .demo b { display: block; color: #6fd38a; margin-bottom: .3rem; }
+    .demo small { color: #9a9ea6; }
+    .note { color: #9a9ea6; font-size: .9em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>bevy_iroh</h1>
+    <p>Share Bevy entities between peers over iroh, with voice and video. This page is the
+      <a href="https://github.com/rvdende/bevy_iroh">README</a>, and the demos below are the
+      crate's examples built for the browser.</p>
+    <div class="demos">
+      <a class="demo" href="webcam/"><b>webcam</b>Voice and a camera: everyone's picture floats over their sphere. <small>Asks for microphone and camera.</small></a>
+      <a class="demo" href="voice/"><b>voice</b>Voice only, with a mute button, a meter and device pickers. <small>Asks for a microphone.</small></a>
+      <a class="demo" href="cube/"><b>cube</b>The hello world: a cube each, driven with the arrow keys. <small>Nothing to allow.</small></a>
+    </div>
+    <p class="note">Open a demo and its address bar becomes the invitation: copy the URL and send it,
+      and whoever opens it joins your room. Two tabs of your own work too. A desktop peer joins
+      with the ticket in that URL: <code>cargo run --example webcam --features ui,webrtc,v4l2 -- &lt;ticket&gt;</code>.
+      Browser peers talk to each other and to desktops over hole-punched WebRTC data channels;
+      the first few seconds before that link is up go through a relay.</p>
+    <article id="readme">Loading the README…</article>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script>
+    fetch("README.md").then(r => r.text()).then(md => {
+      document.getElementById("readme").innerHTML = marked.parse(md);
+    }).catch(e => { document.getElementById("readme").textContent = "Could not load the README: " + e; });
+  </script>
+</body>
+</html>

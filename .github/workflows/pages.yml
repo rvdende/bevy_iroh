@@ -1,0 +1,57 @@
+# The demos at rvdende.github.io/bevy_iroh: the README plus the cube, voice and webcam examples
+# built for the browser. Runs on every push to main.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pages
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli
+      - name: Install wasm-opt
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+      - name: Match wasm-bindgen to the lockfile
+        run: |
+          wanted=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          have=$(wasm-bindgen --version | awk '{print $2}')
+          if [ "$wanted" != "$have" ]; then cargo install wasm-bindgen-cli --version "$wanted" --locked; fi
+      - name: Build the site
+        run: ./scripts/site.sh pages
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

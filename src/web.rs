@@ -36,6 +36,22 @@ pub fn ticket_from_url(param: &str) -> Option<RoomTicket> {
     })
 }
 
+/// Put the ticket into the page's own address bar as `?<param>=<ticket>`, without a reload,
+/// so the URL is the invitation: copy it, send it, and whoever opens it joins. For a page
+/// that hosts a room.
+pub fn share_ticket_in_url(param: &str, ticket: &RoomTicket) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(path) = window.location().pathname() else {
+        return;
+    };
+    let url = format!("{path}?{param}={ticket}");
+    if let Ok(history) = window.history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+    }
+}
+
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }

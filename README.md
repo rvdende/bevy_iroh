@@ -1,5 +1,7 @@
 # bevy_iroh
 
+Live demos, in a browser tab: [rvdende.github.io/bevy_iroh](https://rvdende.github.io/bevy_iroh/).
+
 Share Bevy entities between peers over [iroh](https://iroh.computer): QUIC dialled by public
 key, hole punching with relay fallback, gossip for the room, direct streams for one peer. No
 server. Tag an entity `Shared` and everyone in the room has it.

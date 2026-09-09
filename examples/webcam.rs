@@ -11,7 +11,7 @@
 //! send is what you see.
 #![allow(clippy::type_complexity)]
 
-use bevy::prelude::*;
+use bevy::{prelude::*, window::WindowPlugin};
 use bevy_iroh::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ struct Avatar {
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(window_plugin()),
             IrohPlugin::default().with_display_name(display_name()),
             MediaUiPlugin,
         ))
@@ -150,6 +150,9 @@ fn drive(
 
 fn print_ticket(tickets: Query<&Ticket, Added<Ticket>>) {
     for ticket in &tickets {
+        // In a page the address bar becomes the invitation: copy the URL and send it.
+        #[cfg(target_arch = "wasm32")]
+        bevy_iroh::web::share_ticket_in_url("join", &ticket.0);
         info!(
             "join with:\n\n    cargo run --example webcam --features ui,v4l2 -- {}\n\nor in a browser: http://localhost:8000/?join={}\n",
             ticket.0, ticket.0
@@ -220,4 +223,25 @@ fn display_name() -> String {
 #[cfg(target_arch = "wasm32")]
 fn display_name() -> String {
     "browser".into()
+}
+
+/// On a page, draw into the `#bevy` canvas and fill whatever element holds it; a desktop
+/// gets a window as usual.
+fn window_plugin() -> WindowPlugin {
+    #[cfg(target_arch = "wasm32")]
+    {
+        WindowPlugin {
+            primary_window: Some(Window {
+                canvas: Some("#bevy".into()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: false,
+                ..default()
+            }),
+            ..default()
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        WindowPlugin::default()
+    }
 }

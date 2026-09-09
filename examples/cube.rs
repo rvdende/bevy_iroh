@@ -7,7 +7,7 @@
 //!
 //! Arrow keys move your cube. Peers' cubes glide to where their owners put them.
 
-use bevy::prelude::*;
+use bevy::{prelude::*, window::WindowPlugin};
 use bevy_iroh::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +20,12 @@ struct Cube {
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins.set(bevy::log::LogPlugin {
-                filter: "wgpu=error,naga=warn,bevy_iroh=debug".into(),
-                ..default()
-            }),
+            DefaultPlugins
+                .set(window_plugin())
+                .set(bevy::log::LogPlugin {
+                    filter: "wgpu=error,naga=warn,bevy_iroh=debug".into(),
+                    ..default()
+                }),
             IrohPlugin::default().with_display_name(whoami()),
         ))
         .replicate::<Cube>()
@@ -143,6 +145,9 @@ fn print_ticket(tickets: Query<&Ticket, Added<Ticket>>) {
             "\njoin with:\n\n    cargo run --example cube -- {}\n",
             ticket.0
         );
+        // In a page the address bar becomes the invitation.
+        #[cfg(target_arch = "wasm32")]
+        bevy_iroh::web::share_ticket_in_url("join", &ticket.0);
     }
 }
 
@@ -176,3 +181,24 @@ fn page_title(rooms: Query<(&Room, &RoomStatus)>, peers: Query<&Peer>) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn page_title() {}
+
+/// On a page, draw into the `#bevy` canvas and fill whatever element holds it; a desktop
+/// gets a window as usual.
+fn window_plugin() -> WindowPlugin {
+    #[cfg(target_arch = "wasm32")]
+    {
+        WindowPlugin {
+            primary_window: Some(Window {
+                canvas: Some("#bevy".into()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: false,
+                ..default()
+            }),
+            ..default()
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        WindowPlugin::default()
+    }
+}
