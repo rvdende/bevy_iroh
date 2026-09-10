@@ -198,8 +198,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "RtcPeerConnectionState", "MessageEvent",
 ] }
 
+# docs.rs has no PipeWire headers, so the defaults are off there and `desktop` stays out: its
+# `media::desktop` module is the one thing missing from the hosted docs.
 [package.metadata.docs.rs]
-features = ["media", "ui", "v4l2", "webrtc"]
+no-default-features = true
+features = ["media", "ui", "v4l2", "dmabuf", "webrtc"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The cube example puts the room's status in the tab title; the wasm test logs to the console.
