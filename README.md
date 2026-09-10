@@ -16,7 +16,8 @@ Code and issues: [github.com/rvdende/bevy_iroh](https://github.com/rvdende/bevy_
 
 Share Bevy entities between peers over [iroh](https://iroh.computer): QUIC dialled by public
 key, hole punching with relay fallback, gossip for the room, direct streams for one peer. No
-server. Tag an entity `Shared` and everyone in the room has it.
+server. Tag an entity `Shared` and everyone in the room has it; give it `Voice` and a
+`VideoFeed` and they hear and see you, from a camera or a shared screen.
 
 ```rust
 use bevy::prelude::*;
@@ -65,6 +66,7 @@ another machine. Each sees the other's cube glide as its owner drives it with th
 | `Transform` | 20 Hz, replicas ease toward each arrival over an interval learned from real gaps; never extrapolates |
 | `add_net_message::<T>()` | typed messages: `NetSender::broadcast` is gossip to the room, `send_to` dials one peer; read `Received<T>` with `via` saying which |
 | `Iroh` | the resource: `id()`, `endpoint()`, `spawn(future)` on the network runtime |
+| `Voice`, `VideoFeed` | with `media`: the microphone, a camera (`VideoInput::camera()`) or a screen (`VideoInput::desktop()`) on a shared entity, played and shown where the entity is. Below |
 
 On the wire every message is signed by its author, and the body is opaque and length-prefixed
 under a hashed kind, so a peer on an older build steps over what it does not know and keeps
@@ -97,13 +99,24 @@ once a frame is there, remote ones from the decoder and your own as a preview; p
 material.
 
 Screen sharing is the `desktop` feature: `VideoInput::desktop()` on a shared entity is a
-monitor, window or tab of the person's choosing, and `MediaSettings::share_screen` is the
-switch. Turning it on opens the desktop's own picker, through the ScreenCast portal and
-PipeWire on Linux or `getDisplayMedia` in a page; the frames are fitted into the entity's `VideoFeed` size, so a
-4K monitor goes out as 1080p. When the share is stopped from the other side, the switch turns
-itself off. `VideoFeed::live` tells every replica whether frames are coming, and a replica
-drops its `VideoImage` when they stop, so a camera turned off or a share ended leaves no
-frozen picture behind.
+screen, and `MediaSettings::share_screen` is the switch (the "Share screen" button, with
+`ui`). What turning it on shares depends on where the app runs:
+
+| | |
+|---|---|
+| Linux | the desktop's own picker, through the ScreenCast portal and PipeWire: a monitor or a window, on GNOME, KDE, Hyprland, sway and anything else with a portal backend |
+| macOS | the main display, through ScreenCaptureKit. Screen Recording permission is granted for the *next* launch, so the first try fails and says so |
+| Windows | the primary output, through Desktop Duplication, without the pointer |
+| browser | `getDisplayMedia`: the browser's picker for a tab, a window or a screen |
+
+The frames are fitted into the entity's `VideoFeed` size before they are encoded, so a 4K
+monitor asked for at 1920x1080 goes out as 1080p and a small window goes out as it is. Your
+own screen shows locally too, as a `VideoImage` on the same entity, the way a camera preview
+does. When the share is stopped from the desktop's side, the switch turns itself off.
+`VideoFeed::live` tells every replica whether frames are coming, and a replica drops its
+`VideoImage` when they stop, so a camera turned off or a share ended leaves no frozen picture
+behind. `cargo run --example screen_stats` opens a capture with no window and prints the rate
+the platform delivers, which is the number to look at when a share feels slow.
 
 Which devices: `MediaSettings` names the microphone, speaker and camera by id, and
 `AudioDevices` / `CameraDevices` are the lists to pick from. Change a setting and the device
@@ -119,7 +132,7 @@ an entity with `Voice` and one line of UI:
 ```sh
 cargo run --example voice                # prints a ticket
 cargo run --example voice -- <ticket>
-cargo run                                # the same, plus a camera and a screen (Linux); also `--example webcam`
+cargo run                                # the same, plus a camera and a screen; also `--example webcam`
 ./scripts/web.sh voice                   # the same, in a browser tab
 ```
 
@@ -187,9 +200,11 @@ that on to exercise the path locally.
 ## Status
 
 Rooms, presence, replication, messages, voice, video and screen sharing work, each with a
-two-app integration test over real iroh (`cargo test`); a browser
-peer joins a native host and hears and sees it, over a relay or hole-punched through WebRTC. Next: substrate moving
-onto this crate. See `PLAN.md`.
+two-app integration test over real iroh (`cargo test`); a browser peer joins a native host
+and hears and sees it, over a relay or hole-punched through WebRTC. Cameras and screens have
+been run on Linux and in browsers; the macOS and Windows backends are ported from substrate
+and type-checked in CI, not yet run on a machine. Next: substrate moving onto this crate. See
+`PLAN.md`.
 
 ## License
 
