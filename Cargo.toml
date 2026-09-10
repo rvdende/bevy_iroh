@@ -12,7 +12,7 @@ keywords = ["bevy", "iroh", "p2p", "networking", "multiplayer"]
 categories = ["game-development", "network-programming"]
 
 [features]
-default = []
+default = ["media", "ui", "v4l2", "desktop", "webrtc", "demo"]
 ## Voice and video over the same endpoint: `Voice` on a shared entity publishes the microphone,
 ## remote voices play back spatially; `VideoFeed` does the same for a picture. On a desktop this
 ## pulls in cpal, libopus and openh264 (built from source with cmake); in a page it is Web Audio
@@ -28,6 +28,14 @@ media = [
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
     "dep:js-sys",
+    # Cameras on macOS (AVFoundation) and Windows (Media Foundation).
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:dispatch2",
+    "dep:windows",
 ]
 ## Ready-made Bevy UI for `media`: microphone, speaker and camera pickers, a level meter, a mute
 ## button, and a meter that floats over every remote voice.
@@ -41,14 +49,48 @@ ui = [
     "bevy/bevy_pbr",
     "bevy/bevy_mesh",
 ]
-## Cameras through `bevy_v4l2`: `VideoInput::camera()` opens the one in `MediaSettings`. Linux.
-v4l2 = ["media", "dep:bevy_v4l2"]
+## Cameras through V4L2: `VideoInput::camera()` opens the one in `MediaSettings`, and the
+## `Webcam` entity puts a camera on a plane with YUV to RGB on the GPU. Linux; the
+## dependencies are skipped elsewhere.
+v4l2 = [
+    "media",
+    "dep:v4l",
+    "dep:libc",
+    "dep:crossbeam-channel",
+    "dep:zune-jpeg",
+    "dep:wgpu",
+    "bevy/bevy_render",
+    "bevy/bevy_pbr",
+    "bevy/bevy_mesh",
+    "bevy/bevy_shader",
+]
+## Zero-copy cameras: a `Webcam` plane samples the driver's DMA-BUF through wgpu's Vulkan
+## backend instead of uploading each frame. Needs `DmabufTexturePlugin` before `DefaultPlugins`.
+dmabuf = ["v4l2", "dep:ash", "bevy/raw_vulkan_init"]
+## Screen sharing: `VideoInput::desktop()` publishes a screen. On Linux it is a monitor or
+## window chosen in the desktop's own picker, through the ScreenCast portal and PipeWire (needs
+## the PipeWire headers and clang to build); on macOS the main display through ScreenCaptureKit;
+## on Windows the primary output through Desktop Duplication; in a page `getDisplayMedia`.
+## `MediaSettings::share_screen` turns it on and off.
+desktop = [
+    "media",
+    "dep:ashpd",
+    "dep:pipewire",
+    "dep:futures-util",
+    "dep:objc2-screen-capture-kit",
+    "dep:objc2-core-graphics",
+    "dep:block2",
+]
 ## Media to and from browsers over WebRTC data channels, hole-punched, instead of through a
 ## relay: `str0m` on a desktop, `RTCPeerConnection` in a page. Signalling rides the room.
 webrtc = ["media", "dep:str0m"]
 ## What only a browser has: an identity in localStorage and the ticket from the page URL. The
 ## core transport runs on wasm32 without this.
 wasm = ["dep:web-sys", "dep:wasm-bindgen"]
+## The `bevy_iroh` binary, which is the webcam example: `cargo run` opens a window with voice,
+## a camera and a screen. This is Bevy's default plugin set with a window on Wayland and X11;
+## a library user with their own Bevy does not need it (`default-features = false`).
+demo = ["ui", "desktop", "webrtc", "v4l2", "bevy/default", "bevy/wayland", "bevy/x11"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["bevy_log", "std"] }
@@ -69,8 +111,60 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 cpal = { version = "0.18", optional = true }
 opus = { version = "0.4", optional = true }
 openh264 = { version = "0.9.8", optional = true }
-bevy_v4l2 = { version = "0.3", optional = true, default-features = false, features = ["mjpeg"] }
 str0m = { version = "0.23", optional = true, default-features = false, features = ["aws-lc-rs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# v4l2
+v4l = { version = "0.14", optional = true }
+libc = { version = "0.2", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+zune-jpeg = { version = "0.5", optional = true }
+wgpu = { version = "29", optional = true }
+ash = { version = "0.38", optional = true }
+# desktop
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"], optional = true }
+pipewire = { version = "0.10", optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
+
+# Generated bindings to the system's own APIs, feature-gated per area; the lists name what
+# `media::camera` (Media Foundation) and `media::desktop` (DXGI, Direct3D 11) reach for.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
+
+# The same deal through `objc2`: AVFoundation for `media::camera`, ScreenCaptureKit for
+# `media::desktop`, CoreMedia and CoreVideo for the frames both hand over.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = [
+    "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSValue",
+] }
+objc2-av-foundation = { version = "0.3", optional = true, features = [
+    "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession",
+    "AVCaptureVideoDataOutput", "AVMediaFormat", "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3", optional = true, features = [
+    "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTime", "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3", optional = true, features = [
+    "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn", "objc2-core-graphics",
+] }
+dispatch2 = { version = "0.3", optional = true }
+objc2-screen-capture-kit = { version = "0.3", optional = true, features = [
+    "SCShareableContent", "SCStream", "objc2-core-media", "objc2-core-graphics",
+] }
+objc2-core-graphics = { version = "0.3", optional = true, features = [
+    "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGGeometry",
+] }
+block2 = { version = "0.6", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros"] }
@@ -83,6 +177,7 @@ web-sys = { version = "0.3", optional = true, features = [
     "HtmlVideoElement", "HtmlMediaElement", "HtmlCanvasElement", "CanvasRenderingContext2d",
     "ImageData", "EventTarget",
     "MediaDevices", "MediaStream", "MediaStreamTrack", "MediaStreamConstraints",
+    "MediaStreamTrackState", "DisplayMediaStreamConstraints",
     "MediaTrackConstraints", "MediaDeviceInfo", "MediaDeviceKind",
     "AudioContext", "AudioContextOptions", "AudioContextState", "BaseAudioContext", "AudioNode",
     "AudioParam", "AudioDestinationNode", "AudioBuffer", "GainNode", "ScriptProcessorNode",
@@ -120,6 +215,12 @@ rand = "0.10"
 [profile.dev.package."*"]
 opt-level = 3
 
+# `cargo run` with nothing else is the webcam example: voice, a camera and a screen.
+[[bin]]
+name = "bevy_iroh"
+path = "src/main.rs"
+required-features = ["demo"]
+
 [[example]]
 name = "voice"
 required-features = ["ui"]
@@ -127,6 +228,10 @@ required-features = ["ui"]
 [[example]]
 name = "webcam"
 required-features = ["ui"]
+
+[[example]]
+name = "screen_stats"
+required-features = ["desktop"]
 
 [[test]]
 name = "voice"

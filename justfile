@@ -4,9 +4,6 @@
 
 set positional-arguments
 
-# On Linux the webcam example wants the `v4l2` feature; elsewhere it falls back to no camera.
-v4l2 := if os() == "linux" { ",v4l2" } else { "" }
-
 default:
     @just --list
 
@@ -16,11 +13,11 @@ cube *ticket:
 
 # Voice: spheres with a bar over each head, mute and device pickers top right.
 voice *ticket:
-    cargo run --example voice --features ui,webrtc -- "$@"
+    cargo run --example voice -- "$@"
 
-# Voice and a camera: the same, with everyone's picture over their sphere.
+# Voice, a camera and a screen: everyone's picture over their sphere, a shared screen above.
 webcam *ticket:
-    cargo run --example webcam --features ui,webrtc{{v4l2}} -- "$@"
+    cargo run -- "$@"
 
 # A headless peer that keeps a room alive with an orbiting cube, for browser testing.
 host *ticket:
@@ -42,9 +39,23 @@ web-webcam port="8000":
 # Everything that is checked before a commit.
 check:
     cargo fmt --all -- --check
-    cargo clippy --features ui,webrtc{{v4l2}} --all-targets -- -D warnings
-    cargo test --features ui,webrtc{{v4l2}}
-    cargo check --target wasm32-unknown-unknown --features ui,wasm,webrtc --examples
+    cargo clippy --all-targets -- -D warnings
+    cargo test
+    cargo check --target wasm32-unknown-unknown --features wasm --examples
+
+# `just release 0.5.0`, on a clean main: the checks, the version in Cargo.toml, a commit, the
+# tag `v0.5.0` and a push. The publish workflow takes it from there.
+# Cut a release: checks, version bump, commit, tag and push; publish.yml does the rest.
+release version:
+    #!/usr/bin/env sh
+    set -eu
+    [ -z "$(git status --porcelain)" ] || { echo "commit or stash first" >&2; exit 1; }
+    just check
+    sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    cargo update --workspace --offline
+    git commit -am "release: bevy_iroh {{version}}"
+    git tag "v{{version}}"
+    git push origin HEAD "v{{version}}"
 
 # The browser transport test, in a headless browser (geckodriver or chromedriver on PATH).
 test-wasm:

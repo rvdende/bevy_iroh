@@ -1,6 +1,6 @@
 //! Voice and video over the same endpoint. Behind the `media` feature.
 //!
-//! Put [`Voice`] on a [`Shared`](crate::replicate::Shared) entity and your microphone goes to
+//! Put [`Voice`] on a [`Shared`] entity and your microphone goes to
 //! everyone in the room, announced by replication like any other component. A remote entity
 //! that arrives with `Voice` is subscribed to and played back, with gain and pan from where it
 //! is relative to the [`AudioListener`]. Nothing to write on the receiving side.
@@ -13,6 +13,13 @@
 //! while everything published carries on.
 
 pub mod audio;
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(target_arch = "wasm32")
+))]
+pub mod camera;
+#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+pub mod desktop;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
@@ -85,11 +92,18 @@ pub struct MicLevel(pub f32);
 pub struct VideoFeed {
     pub width: u32,
     pub height: u32,
+    /// Frames are being sent. Set by the owner; false while the camera is off or the share
+    /// has ended, and replicas drop their [`VideoImage`] so nothing shows a stale picture.
+    pub live: bool,
 }
 
 impl VideoFeed {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            live: false,
+        }
     }
 }
 
@@ -97,6 +111,9 @@ impl VideoFeed {
 #[derive(Component)]
 pub struct VideoInput {
     kind: InputKind,
+    /// The feed's size when the input was first opened, so a later reopen asks for the same
+    /// rather than for whatever the last device delivered.
+    wanted: Option<(u32, u32)>,
     pub config: VideoConfig,
     /// Also keep a [`VideoImage`] of what is being sent on this entity, so the app can show
     /// the person their own picture the same way it shows everyone else's.
@@ -106,6 +123,8 @@ pub struct VideoInput {
 enum InputKind {
     /// The camera named in [`MediaSettings::camera`], reopened when that changes.
     Camera,
+    /// A monitor or window, while [`MediaSettings::share_screen`] is on.
+    Desktop,
     Source(Mutex<Option<Box<dyn VideoSource>>>),
 }
 
@@ -114,17 +133,33 @@ impl VideoInput {
     pub fn new(source: impl VideoSource) -> Self {
         Self {
             kind: InputKind::Source(Mutex::new(Some(Box::new(source)))),
+            wanted: None,
             config: VideoConfig::default(),
             preview: false,
         }
     }
 
-    /// Frames from the camera chosen in [`MediaSettings`]: a `bevy_v4l2` device on Linux
-    /// with the `v4l2` feature, `getUserMedia` in a page. Opened at about the size the
+    /// Frames from the camera chosen in [`MediaSettings`]: a V4L2 device on Linux with the
+    /// `v4l2` feature, AVFoundation on macOS, Media Foundation on Windows, `getUserMedia` in
+    /// a page. Opened at about the size the
     /// entity's [`VideoFeed`] asks for.
     pub fn camera() -> Self {
         Self {
             kind: InputKind::Camera,
+            wanted: None,
+            config: VideoConfig::default(),
+            preview: true,
+        }
+    }
+
+    /// A screen, window or tab, chosen in the desktop's or browser's own picker whenever
+    /// [`MediaSettings::share_screen`] turns on. Fitted into the entity's [`VideoFeed`] size,
+    /// so ask for 1920x1080 and a 4K monitor arrives as 1080p. Needs the `desktop` feature;
+    /// without it the input never opens.
+    pub fn desktop() -> Self {
+        Self {
+            kind: InputKind::Desktop,
+            wanted: None,
             config: VideoConfig::default(),
             preview: true,
         }
@@ -165,6 +200,9 @@ pub struct MediaSettings {
     pub microphone: MicrophoneChoice,
     pub speaker: SpeakerChoice,
     pub camera: CameraChoice,
+    /// Whether every [`VideoInput::desktop`] is sending. Turning it on opens the picker;
+    /// it turns itself off when the share ends from the other side.
+    pub share_screen: bool,
     /// Metres at which a voice fades to silence.
     pub voice_range: f32,
     /// Master gain on everything heard, 0 to 1 (and above, if you must).
@@ -177,6 +215,7 @@ impl Default for MediaSettings {
             microphone: MicrophoneChoice::Default,
             speaker: SpeakerChoice::Default,
             camera: CameraChoice::Default,
+            share_screen: false,
             voice_range: 10.0,
             output_volume: 1.0,
         }
@@ -549,6 +588,15 @@ fn apply_settings(
             }
         }
     }
+    if !settings.share_screen {
+        for entity in &mut feeds {
+            if matches!(inputs.get(entity).map(|i| &i.kind), Ok(InputKind::Desktop)) {
+                commands
+                    .entity(entity)
+                    .remove::<(Encoding, CameraRetry, VideoFeedStats, VideoImage)>();
+            }
+        }
+    }
 }
 
 fn publish(
@@ -760,13 +808,13 @@ fn publish_video(
     mut commands: Commands,
     iroh: Option<Res<Iroh>>,
     media: Res<Media>,
-    settings: Res<MediaSettings>,
+    mut settings: ResMut<MediaSettings>,
     time: Res<Time<bevy::time::Real>>,
     mut feeds: Query<
         (
             Entity,
             &NetId,
-            &VideoInput,
+            &mut VideoInput,
             &mut VideoFeed,
             Option<&CameraRetry>,
             Option<&Encoding>,
@@ -777,14 +825,35 @@ fn publish_video(
 ) {
     let Some(iroh) = iroh else { return };
     let now = time.elapsed_secs_f64();
-    for (entity, id, input, mut feed, retry, encoding, stats) in &mut feeds {
+    for (entity, id, mut input, mut feed, retry, encoding, stats) in &mut feeds {
         if let Some(encoding) = encoding {
+            if encoding.0.finished.load(Ordering::Relaxed) {
+                // The source is gone for good: a share stopped from the desktop's side, a
+                // camera unplugged. Cameras are tried again; a share waits for the next ask.
+                info!("bevy_iroh: video source ended");
+                commands
+                    .entity(entity)
+                    .remove::<(Encoding, VideoFeedStats, VideoImage)>();
+                match input.kind {
+                    InputKind::Desktop => settings.share_screen = false,
+                    InputKind::Camera => {
+                        commands
+                            .entity(entity)
+                            .insert(CameraRetry(now + DEVICE_RETRY));
+                    }
+                    InputKind::Source(_) => {}
+                }
+                continue;
+            }
             // Running: keep the announced size honest and the counters current.
-            if let Some((w, h)) = encoding.0.size()
-                && (feed.width, feed.height) != (w, h)
-            {
-                feed.width = w;
-                feed.height = h;
+            if let Some((w, h)) = encoding.0.size() {
+                if (feed.width, feed.height) != (w, h) {
+                    feed.width = w;
+                    feed.height = h;
+                }
+                if !feed.live {
+                    feed.live = true;
+                }
             }
             let fresh = encoding.0.stats();
             match stats {
@@ -799,22 +868,44 @@ fn publish_video(
             }
             continue;
         }
+        if feed.live {
+            feed.live = false;
+        }
         if retry.is_some_and(|r| now < r.0) {
             continue;
         }
+        let (width, height) = *input.wanted.get_or_insert((feed.width, feed.height));
         let source: Option<Box<dyn VideoSource>> = match &input.kind {
             InputKind::Source(slot) => slot.lock().unwrap_or_else(|e| e.into_inner()).take(),
             InputKind::Camera => {
                 let Ok(camera) = settings.camera.id() else {
                     continue;
                 };
-                match open_camera(camera, feed.width, feed.height, input.config.max_fps) {
+                match open_camera(camera, width, height, input.config.max_fps) {
                     Ok(source) => Some(source),
                     Err(e) => {
-                        error!("bevy_iroh: camera: {e}");
+                        // Once loudly, then quietly every retry.
+                        if retry.is_none() {
+                            error!("bevy_iroh: camera: {e}");
+                        } else {
+                            debug!("bevy_iroh: camera: {e}");
+                        }
                         commands
                             .entity(entity)
                             .insert(CameraRetry(now + DEVICE_RETRY));
+                        None
+                    }
+                }
+            }
+            InputKind::Desktop => {
+                if !settings.share_screen {
+                    continue;
+                }
+                match open_desktop(width, height) {
+                    Ok(source) => Some(source),
+                    Err(e) => {
+                        error!("bevy_iroh: screen share: {e}");
+                        settings.share_screen = false;
                         None
                     }
                 }
@@ -861,15 +952,45 @@ fn open_camera(
     {
         v4l2::Camera::open(id, width, height, fps).map(|c| Box::new(c) as Box<dyn VideoSource>)
     }
+    #[cfg(all(
+        any(target_os = "macos", target_os = "windows"),
+        not(target_arch = "wasm32")
+    ))]
+    {
+        camera::Camera::open(id, width, height, fps).map(|c| Box::new(c) as Box<dyn VideoSource>)
+    }
     #[cfg(target_arch = "wasm32")]
     {
         web::video::Camera::open(id, width, height, fps)
             .map(|c| Box::new(c) as Box<dyn VideoSource>)
     }
-    #[cfg(not(any(all(feature = "v4l2", target_os = "linux"), target_arch = "wasm32")))]
+    #[cfg(not(any(
+        all(feature = "v4l2", target_os = "linux"),
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    )))]
     {
         let _ = (id, width, height, fps);
         Err("no camera backend on this platform: enable the `v4l2` feature on Linux, or give the entity a VideoInput of your own".into())
+    }
+}
+
+/// The platform's screen picker, as a source.
+fn open_desktop(width: u32, height: u32) -> Result<Box<dyn VideoSource>, String> {
+    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+    {
+        desktop::Screen::open(width, height).map(|s| Box::new(s) as Box<dyn VideoSource>)
+    }
+    #[cfg(all(feature = "desktop", target_arch = "wasm32"))]
+    {
+        let _ = (width, height);
+        web::video::Camera::open_screen().map(|c| Box::new(c) as Box<dyn VideoSource>)
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = (width, height);
+        Err("screen sharing needs the `desktop` feature".into())
     }
 }
 
@@ -929,24 +1050,31 @@ fn video_frames(
     mut commands: Commands,
     media: Res<Media>,
     images: Option<ResMut<Assets<Image>>>,
-    mut feeds: Query<
-        (
-            Entity,
-            &NetId,
-            Option<&VideoImage>,
-            Has<Remote>,
-            Option<&Encoding>,
-            Option<&mut VideoStats>,
-        ),
-        With<VideoFeed>,
-    >,
+    mut feeds: Query<(
+        Entity,
+        &NetId,
+        &VideoFeed,
+        Option<&VideoImage>,
+        Has<Remote>,
+        Option<&Encoding>,
+        Option<&mut VideoStats>,
+    )>,
 ) {
     let Some(mut images) = images else { return };
-    for (entity, id, image, remote, encoding, stats) in &mut feeds {
+    for (entity, id, feed, image, remote, encoding, stats) in &mut feeds {
         let frame = if remote {
             let Some(track) = media.hub.remote_video(id.0) else {
                 continue;
             };
+            if !feed.live {
+                // The owner stopped sending: drop the picture rather than keep the last frame
+                // up, and let what the decoder still holds go.
+                let _ = track.take_frame();
+                if image.is_some() {
+                    commands.entity(entity).remove::<(VideoImage, VideoStats)>();
+                }
+                continue;
+            }
             let fresh = track.stats();
             match stats {
                 Some(mut s) => {

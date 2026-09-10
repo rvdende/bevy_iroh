@@ -7,9 +7,19 @@ local feeds, per-subscriber video fan-out with a 150 ms catch-up rule, and the `
 (`MediaPanel`, `VoiceIndicator`). `examples/voice.rs` and `examples/webcam.rs` replace
 `conference`. The `webrtc` feature (branch `webrtc`) reaches browsers over hole-punched data
 channels instead of the relay: `str0m` natively, `RTCPeerConnection` in a page, signalling over
-the room; verified desktop to browser across two machines on a LAN. Substrate's voice buffering rules are in `media/audio.rs`; substrate migration is
-on robot2's `bevy-iroh` branch (`crates/substrate/MIGRATION.md`). Next: substrate onto
-bevy_iroh; echo cancellation on desktops; a hardware encoder path.
+the room; verified desktop to browser across two machines on a LAN. 0.5.0 (2026-09-10): the
+`desktop` feature shares a screen: `VideoInput::desktop()` + `MediaSettings::share_screen`,
+through the ScreenCast portal + PipeWire on Linux (other platforms report unsupported) or
+`getDisplayMedia` in a page, fitted into the
+feed's size with a box filter; `VideoFeed::live` lets replicas drop a stale picture. Substrate's
+voice buffering rules are in `media/audio.rs`; substrate migration is on robot2's `bevy-iroh`
+branch (`crates/substrate/MIGRATION.md`). 2026-09-10: `bevy_desktop` and `bevy_v4l2` folded
+in as `media::desktop` and `media::v4l2`; macOS (ScreenCaptureKit, AVFoundation) and Windows
+(Desktop Duplication, Media Foundation) screen and camera backends ported from substrate,
+type-checked against those targets but not yet run on either. Next: run them on a Mac and a
+Windows machine; substrate onto bevy_iroh; echo cancellation on desktops; a hardware encoder
+path; DMA-BUF straight to the local screen plane (substrate's `display_capture` has the Vulkan
+side).
 
 A Bevy plugin that makes entities shareable between peers over [iroh](https://iroh.computer):
 QUIC dialled by public key, hole punching with relay fallback, gossip for the group, direct
@@ -304,8 +314,9 @@ commands.spawn((Shared::default(), VideoFeed::from(source), Transform::..)); // 
   local one does, stop on removal. Bytes never touch gossip.
 - **Sources are traits.** `VideoSource` (YUV frames with timestamps, newest wins) and
   `AudioSource` (PCM blocks). The feature ships a cpal microphone source and speaker sink.
-  A **`v4l2`** feature (Linux) adds the `bevy_v4l2` adapter so a `Webcam` entity is a source
-  with no glue; other cameras and screen capture implement the trait.
+  A **`v4l2`** feature (Linux) is V4L2 capture in-tree (`media::v4l2`, formerly the
+  `bevy_v4l2` crate) so a `Webcam` entity is a source with no glue; other cameras implement
+  the trait. Screen capture is likewise in-tree as `media::desktop` (formerly `bevy_desktop`).
 - **Playback is the missing half of NETWORKING.md §11 and is built here:** per‑track jitter
   buffer (adaptive 40–200 ms), mixing across peers, gain and pan from the relative `Transform`,
   never playing back your own microphone. Headphones first; echo cancellation is not promised.
@@ -318,7 +329,7 @@ commands.spawn((Shared::default(), VideoFeed::from(source), Transform::..)); // 
   size and the relay tree for a thousand viewers are NETWORKING.md §10 and stay future work;
   `VideoFeed::rendition` exists from the start so the wire does not change when they land.
 
-`bevy_v4l2` needs two small additions for this: a raw full‑YUV tap for encoders (today's
+`media::v4l2` needs two small additions for this: a raw full‑YUV tap for encoders (today's
 `FrameTap` is luma only, for calibration; optionally the DMA‑BUF fd + layout for a future
 VAAPI encoder) and an external feed so a decoder pushes I420/NV12 through the same
 `WebcamMaterial` YUV shader. A remote camera is then a plane whose producer is a decoder.
@@ -351,7 +362,7 @@ traits, plus the MoQ accept‑forwarding workaround for the router's `Send` disa
 ```
 bevy_iroh/
   Cargo.toml            lib; bevy default-features=false (ecs, app, transform, time, log)
-                        features: media, v4l2 (implies media, linux), wasm; none on by default
+                        features: media, ui, v4l2 (linux), desktop, webrtc on by default; wasm opt-in
   src/lib.rs            IrohPlugin, IrohSet, prelude, AppExt (replicate, add_net_message)
   src/net/mod.rs        Node: endpoint, router, gossip, subscriptions, shutdown   (from substrate-net lib.rs)
   src/net/proto.rs      Envelope, Signed, Kind hash, encode/decode, limits         (from proto.rs)
@@ -371,7 +382,8 @@ bevy_iroh/
   src/media/audio.rs    [media] cpal source/sink, opus, jitter buffer, mixer, spatial gain
   src/media/video.rs    [media] H.264 encode/decode, decoded frames → Image
   src/media/web.rs      [media+wasm] WebCodecs / Web Audio backends
-  src/media/v4l2.rs     [media+v4l2] bevy_v4l2 adapter
+  src/media/v4l2/       [media+v4l2] V4L2 capture, Webcam plane, colour tap for the encoder
+  src/media/desktop/    [media+desktop] ScreenCast portal + PipeWire capture, Screen source
   src/web.rs            [wasm] localStorage identity, page URL join
   examples/conference.rs [media] voice + camera planes per peer
   examples/cube.rs      the hello world
@@ -409,7 +421,7 @@ mixing, spatial gain, own‑mic suppression, MoQ transport behind its boundary. 
 decision for publishing. `examples/conference.rs` with voice and push‑to‑talk.
 
 **M6 — video.** `VideoFeed`, H.264 via openh264, `VideoSource` trait, the `v4l2` adapter,
-decoded frames onto a plane, the two `bevy_v4l2` additions. Conference example gains cameras.
+decoded frames onto a plane, the two `media::v4l2` additions. Conference example gains cameras.
 
 **M7 — browser.** `wasm` feature: web identity and join URL, then WebCodecs/Web Audio backends
 and the accept‑forwarding workaround. The conference example runs in a page against a native

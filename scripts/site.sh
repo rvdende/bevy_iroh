@@ -11,11 +11,7 @@ rm -rf site && mkdir -p site
 cp README.md web/site.html site/ && mv site/site.html site/index.html
 cp PLAN.md site/ 2>/dev/null || true
 for example in cube voice webcam; do
-  case "$example" in
-    cube) features="wasm" ;;
-    *) features="wasm,ui,webrtc" ;;
-  esac
-  cargo build --profile "$profile" --example "$example" --target wasm32-unknown-unknown --features "$features"
+  cargo build --profile "$profile" --example "$example" --target wasm32-unknown-unknown --features wasm
   mkdir -p "site/$example"
   wasm-bindgen --target web --no-typescript --out-dir "site/$example" --out-name app \
     "target/wasm32-unknown-unknown/$profile/examples/$example.wasm"

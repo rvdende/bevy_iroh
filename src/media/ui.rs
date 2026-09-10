@@ -55,6 +55,11 @@ impl Plugin for MediaUiPlugin {
                 sync_indicators,
             ),
         );
+        #[cfg(feature = "desktop")]
+        app.add_systems(
+            Update,
+            (build_screen_buttons, screen_clicks, sync_screen_buttons),
+        );
     }
 }
 
@@ -145,6 +150,8 @@ fn build_panels(mut commands: Commands, panels: Query<(Entity, &MediaPanel), Add
                     strip.spawn(MicMeter::default());
                     if panel.video {
                         strip.spawn(CameraButton);
+                        #[cfg(feature = "desktop")]
+                        strip.spawn(ScreenButton);
                     }
                     strip
                         .spawn((
@@ -373,6 +380,74 @@ fn sync_camera_buttons(
         ("Cam off", MUTED)
     } else {
         ("Cam on", TEXT)
+    };
+    for (mut label, mut tint) in &mut labels {
+        if label.0 != text {
+            label.0 = text.into();
+            tint.0 = colour;
+        }
+    }
+}
+
+// -- screen sharing ------------------------------------------------------------------------
+
+/// A button that starts and stops screen sharing: [`MediaSettings::share_screen`]. Reads
+/// "Share screen" or "Stop sharing". Needs the `desktop` feature.
+#[cfg(feature = "desktop")]
+#[derive(Component, Debug, Clone, Default)]
+pub struct ScreenButton;
+
+#[cfg(feature = "desktop")]
+#[derive(Component)]
+struct ScreenLabel;
+
+#[cfg(feature = "desktop")]
+fn build_screen_buttons(mut commands: Commands, buttons: Query<Entity, Added<ScreenButton>>) {
+    for entity in &buttons {
+        commands
+            .entity(entity)
+            .insert((
+                Button,
+                Node {
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                    min_width: Val::Px(64.0),
+                    justify_content: JustifyContent::Center,
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(ROW),
+            ))
+            .with_child((
+                ScreenLabel,
+                Text::new("Share screen"),
+                TextFont::from_font_size(13.0),
+                TextColor(TEXT),
+            ));
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn screen_clicks(
+    buttons: Query<&Interaction, (With<ScreenButton>, Changed<Interaction>)>,
+    mut settings: ResMut<MediaSettings>,
+) {
+    for interaction in &buttons {
+        if *interaction == Interaction::Pressed {
+            let on = settings.share_screen;
+            settings.share_screen = !on;
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn sync_screen_buttons(
+    settings: Res<MediaSettings>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<ScreenLabel>>,
+) {
+    let (text, colour) = if settings.share_screen {
+        ("Stop sharing", METER_GREEN)
+    } else {
+        ("Share screen", TEXT)
     };
     for (mut label, mut tint) in &mut labels {
         if label.0 != text {

@@ -52,7 +52,8 @@ impl AudioDevice {
 /// One camera.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraDevice {
-    /// What to put in `MediaSettings::camera`. A device path on Linux, `deviceId` in a page.
+    /// What to put in `MediaSettings::camera`. A device path on Linux, AVFoundation's
+    /// `uniqueID` on macOS, a Media Foundation symbolic link on Windows, `deviceId` in a page.
     pub id: String,
     pub name: String,
     pub is_default: bool,
@@ -108,7 +109,7 @@ impl AudioDevices {
     }
 }
 
-/// Every camera the machine will name. Linux (`v4l2` feature) and browsers.
+/// Every camera the machine will name: Linux (`v4l2` feature), macOS, Windows and browsers.
 #[derive(Resource, Debug, Default)]
 pub struct CameraDevices {
     pub cameras: Vec<CameraDevice>,
@@ -166,9 +167,23 @@ pub(crate) fn scan_cameras(mut devices: ResMut<CameraDevices>) {
         devices.permission = Permission::Ready;
         info!("bevy_iroh: {} camera(s)", devices.cameras.len());
     }
+    #[cfg(all(
+        any(target_os = "macos", target_os = "windows"),
+        not(target_arch = "wasm32")
+    ))]
+    {
+        devices.cameras = super::camera::cameras();
+        devices.permission = Permission::Ready;
+        info!("bevy_iroh: {} camera(s)", devices.cameras.len());
+    }
     #[cfg(target_arch = "wasm32")]
     super::web::devices::request_cameras(&mut devices);
-    #[cfg(not(any(all(feature = "v4l2", target_os = "linux"), target_arch = "wasm32")))]
+    #[cfg(not(any(
+        all(feature = "v4l2", target_os = "linux"),
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    )))]
     {
         devices.permission = Permission::Ready;
     }

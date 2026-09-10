@@ -1,15 +1,19 @@
-//! Voice and a camera: everyone in the room is a sphere with their picture floating over it.
+//! Voice, a camera and a screen: everyone in the room is a sphere with their picture floating
+//! over it, and a big screen above that while they share one.
 //!
 //! ```sh
-//! cargo run --example webcam --features ui,v4l2            # Linux: prints a ticket
-//! cargo run --example webcam --features ui,v4l2 -- <ticket>
-//! ./scripts/web.sh webcam                                  # the same, in a browser tab
+//! cargo run                     # prints a ticket (also `cargo run --example webcam`)
+//! cargo run -- <ticket>
+//! ./scripts/web.sh webcam       # the same, in a browser tab
 //! ```
 //!
 //! Everything the `voice` example does, plus a `VideoFeed` on the same entity fed by the
-//! camera picked under "Devices". Your own picture shows over your sphere too, so what you
-//! send is what you see. Enter opens the chat box at the bottom left; what anyone types
-//! floats over their sphere for fifteen seconds and lands in the log.
+//! camera picked under "Devices", and a second shared entity with `VideoInput::desktop()`
+//! that follows the sphere: "Share screen" in the panel opens the desktop's own picker, and
+//! whatever is chosen appears over everyone's copy of you until "Stop sharing". Your own
+//! pictures show too, so what you send is what you see. Enter opens the chat box at the
+//! bottom left; what anyone types floats over their sphere for fifteen seconds and lands in
+//! the log.
 #![allow(clippy::type_complexity)]
 
 use bevy::{
@@ -26,11 +30,18 @@ struct Avatar {
     hue: f32,
 }
 
+/// A shared screen, one per person, hanging over their avatar while they share.
+#[derive(Component, Serialize, Deserialize, Clone)]
+struct Desk;
+
 /// One line of chat, broadcast to the room.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Chat(String);
 
-fn main() {
+/// Where a desk hangs, over its owner.
+const DESK_ABOVE: f32 = 3.2;
+
+pub fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(window_plugin()),
@@ -38,10 +49,14 @@ fn main() {
             MediaUiPlugin,
         ))
         .replicate::<Avatar>()
+        .replicate::<Desk>()
         .add_net_message::<Chat>()
         .init_resource::<Composer>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (drive, print_ticket, announce, screens, page_title))
+        .add_systems(
+            Update,
+            (drive, follow, print_ticket, announce, screens, page_title),
+        )
         .add_systems(Update, (compose, receive_chat, bubbles, chat_ui).chain())
         .add_observer(on_add_avatar)
         .run();
@@ -58,6 +73,11 @@ fn setup(
     };
     // Me: a voice and a picture on one shared entity. The camera is whichever one the
     // settings name; the panel below changes it.
+    let at = Vec3::new(
+        rand::random::<f32>() * 4.0 - 2.0,
+        0.5,
+        rand::random::<f32>() * 4.0 - 2.0,
+    );
     commands.spawn((
         Avatar {
             hue: rand::random::<f32>() * 360.0,
@@ -66,11 +86,16 @@ fn setup(
         VideoFeed::new(640, 480),
         VideoInput::camera(),
         Shared::default(),
-        Transform::from_xyz(
-            rand::random::<f32>() * 4.0 - 2.0,
-            0.5,
-            rand::random::<f32>() * 4.0 - 2.0,
-        ),
+        Transform::from_translation(at),
+    ));
+    // My screen: nothing until "Share screen", then whatever the picker chose, fitted into
+    // 1080p. Its own entity so it can be a different size and place from the camera's.
+    commands.spawn((
+        Desk,
+        VideoFeed::new(1920, 1080),
+        VideoInput::desktop(),
+        Shared::default(),
+        Transform::from_translation(at + Vec3::Y * DESK_ABOVE),
     ));
     commands.spawn(MediaPanel::video());
     chat_panel(&mut commands);
@@ -119,28 +144,72 @@ fn on_add_avatar(
 }
 
 /// A screen floats over each avatar once there is a picture for it: a peer's when it arrives,
-/// and my own, since `VideoInput::camera()` keeps a preview.
+/// and my own, since `VideoInput::camera()` keeps a preview. Desks get a bigger one. When the
+/// picture goes (camera off, share stopped) the screen goes with it.
 #[derive(Component)]
 struct Screen;
+
+/// My desk keeps over my avatar as I drive; peers see it move like anything else shared.
+fn follow(
+    avatars: Query<&Transform, (With<Avatar>, Without<Remote>, Without<Desk>)>,
+    mut desks: Query<&mut Transform, (With<Desk>, Without<Remote>)>,
+) {
+    let Ok(avatar) = avatars.single() else { return };
+    for mut desk in &mut desks {
+        let want = avatar.translation + Vec3::Y * DESK_ABOVE;
+        if desk.translation.distance_squared(want) > 1e-6 {
+            desk.translation = want;
+        }
+    }
+}
 
 fn screens(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    arrived: Query<(Entity, &VideoImage, &VideoFeed), (With<Avatar>, Added<VideoImage>)>,
+    arrived: Query<
+        (
+            Entity,
+            &VideoImage,
+            &VideoFeed,
+            Has<Desk>,
+            Option<&Children>,
+        ),
+        Changed<VideoImage>,
+    >,
+    mut gone: RemovedComponents<VideoImage>,
+    screens: Query<Entity, With<Screen>>,
+    children: Query<&Children>,
 ) {
-    for (entity, image, feed) in &arrived {
+    let take_down = |commands: &mut Commands, kids: Option<&Children>| {
+        for child in kids.into_iter().flatten() {
+            if screens.contains(*child) {
+                commands.entity(*child).despawn();
+            }
+        }
+    };
+    for (entity, image, feed, desk, kids) in &arrived {
+        // A new handle means a new size: replace the screen rather than stack one.
+        take_down(&mut commands, kids);
         let aspect = feed.width as f32 / feed.height.max(1) as f32;
+        let (width, above) = if desk {
+            (3.2, 0.0)
+        } else {
+            (0.6 * aspect, 1.5)
+        };
         commands.entity(entity).with_child((
             Screen,
-            Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.6 * aspect, 0.6)))),
+            Mesh3d(meshes.add(Plane3d::new(Vec3::Z, Vec2::new(width, width / aspect)))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color_texture: Some(image.0.clone()),
                 unlit: true,
                 ..default()
             })),
-            Transform::from_xyz(0.0, 1.5, 0.0),
+            Transform::from_xyz(0.0, above, 0.0),
         ));
+    }
+    for entity in gone.read() {
+        take_down(&mut commands, children.get(entity).ok());
     }
 }
 
@@ -183,7 +252,7 @@ fn print_ticket(tickets: Query<&Ticket, Added<Ticket>>) {
         #[cfg(target_arch = "wasm32")]
         bevy_iroh::web::share_ticket_in_url("join", &ticket.0);
         info!(
-            "join with:\n\n    cargo run --example webcam --features ui,v4l2 -- {}\n\nor in a browser: http://localhost:8000/?join={}\n",
+            "join with:\n\n    cargo run --example webcam -- {}\n\nor in a browser: http://localhost:8000/?join={}\n",
             ticket.0, ticket.0
         );
     }

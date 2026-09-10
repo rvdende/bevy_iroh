@@ -1,0 +1,51 @@
+# Publish to crates.io when a version tag is pushed: `just release 0.5.0` bumps Cargo.toml,
+# commits, tags `v0.5.0` and pushes; this checks the tag against the manifest, runs the same
+# checks as ci, publishes, and opens a GitHub release with generated notes.
+#
+# Authentication is crates.io Trusted Publishing, so there is no long-lived token to keep: on
+# crates.io, under the crate's Settings > Trusted Publishing, add this repository with the
+# workflow file name `publish.yml` (no environment). The `id-token: write` permission below is
+# what lets the job prove to crates.io which workflow it is.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Native dependencies (cpal, gilrs, cmake for libopus and openh264, PipeWire)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev cmake libpipewire-0.3-dev clang
+      - name: The tag names the version in Cargo.toml
+        run: |
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$manifest" != "$tag" ]; then
+            echo "tag v$tag but Cargo.toml says $manifest" >&2
+            exit 1
+          fi
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo check --target wasm32-unknown-unknown --features wasm --examples
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --title "bevy_iroh ${GITHUB_REF_NAME#v}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

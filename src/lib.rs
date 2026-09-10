@@ -10,6 +10,7 @@
 //! commands.spawn((Cube, Shared::default(), Transform::default()));
 //! ```
 #![allow(clippy::type_complexity)]
+#![recursion_limit = "256"]
 
 #[cfg(feature = "media")]
 pub mod media;
@@ -30,6 +31,8 @@ pub use net::{
 pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};
 
 pub mod prelude {
+    #[cfg(all(feature = "ui", feature = "desktop"))]
+    pub use crate::media::ui::ScreenButton;
     #[cfg(feature = "ui")]
     pub use crate::media::ui::{
         CameraButton, DevicePicker, MediaPanel, MediaUiPlugin, MicMeter, MuteButton, VoiceIndicator,

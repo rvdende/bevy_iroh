@@ -7,11 +7,7 @@ set -eu
 cd "$(dirname "$0")/.."
 example="${1:-cube}"
 port="${2:-8000}"
-case "$example" in
-  cube) features="wasm" ;;
-  *) features="wasm,ui,webrtc" ;;
-esac
-cargo build --profile web --example "$example" --target wasm32-unknown-unknown --features "$features"
+cargo build --profile web --example "$example" --target wasm32-unknown-unknown --features wasm
 wasm-bindgen --target web --no-typescript --out-dir web --out-name app \
   "target/wasm32-unknown-unknown/web/examples/$example.wasm"
 if [ "${HTTPS:-}" = "1" ]; then

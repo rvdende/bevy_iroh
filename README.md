@@ -6,9 +6,9 @@
 [![pages](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml/badge.svg)](https://github.com/rvdende/bevy_iroh/actions/workflows/pages.yml)
 
 ```sh
-cargo add bevy_iroh                                  # rooms, presence, replication, messages
-cargo add bevy_iroh --features ui,webrtc             # plus voice, video, the panel, and direct links to browsers
-cargo add bevy_iroh --features ui,webrtc,v4l2        # plus cameras on Linux
+cargo add bevy_iroh                                   # rooms, presence, replication, messages, voice, video, screens, the panel
+cargo add bevy_iroh --no-default-features             # the transport alone
+cargo add bevy_iroh --no-default-features -F media    # plus voice and video without the Bevy UI
 ```
 
 Live demos, in a browser tab: [rvdende.github.io/bevy_iroh](https://rvdende.github.io/bevy_iroh/).
@@ -74,8 +74,13 @@ codec's `verify` runs before its `decode`.
 ## Voice and video: the `media` feature
 
 ```toml
-bevy_iroh = { version = "0.4", features = ["ui", "webrtc"] }   # ui = media + Bevy UI; webrtc = direct to browsers
+bevy_iroh = "0.4"   # every feature but `wasm` is on by default
 ```
+
+That includes `demo`, which gives `cargo run` in a checkout a window of its own (Bevy's
+default plugins on Wayland and X11) so it can be the webcam example. An app that brings its
+own Bevy can leave it off: `default-features = false, features = ["ui", "webrtc", "v4l2",
+"desktop"]`.
 
 Put `Voice` on a shared entity and your microphone goes to everyone in the room. A remote
 entity that arrives with `Voice` is played back from where it is, relative to the camera that
@@ -91,21 +96,31 @@ skips to the next keyframe and nobody else notices. A `VideoFeed` gets a `VideoI
 once a frame is there, remote ones from the decoder and your own as a preview; put it on a
 material.
 
+Screen sharing is the `desktop` feature: `VideoInput::desktop()` on a shared entity is a
+monitor, window or tab of the person's choosing, and `MediaSettings::share_screen` is the
+switch. Turning it on opens the desktop's own picker, through the ScreenCast portal and
+PipeWire on Linux or `getDisplayMedia` in a page; the frames are fitted into the entity's `VideoFeed` size, so a
+4K monitor goes out as 1080p. When the share is stopped from the other side, the switch turns
+itself off. `VideoFeed::live` tells every replica whether frames are coming, and a replica
+drops its `VideoImage` when they stop, so a camera turned off or a share ended leaves no
+frozen picture behind.
+
 Which devices: `MediaSettings` names the microphone, speaker and camera by id, and
 `AudioDevices` / `CameraDevices` are the lists to pick from. Change a setting and the device
 is reopened while everything published keeps its track ids. `MicLevel` is the microphone's
 level for a meter in a corner.
 
 The `ui` feature is the corner and the meters, built: `commands.spawn(MediaPanel::voice())`
-is a mute button, a level bar and a "Devices" button that opens the pickers; `VoiceIndicator`
+is a mute button, a level bar and a "Devices" button that opens the pickers;
+`MediaPanel::video()` adds the camera toggle and, with `desktop`, "Share screen"; `VoiceIndicator`
 on any entity with a `VoiceLevel` floats a small green bar over it. So a room with voice is
 an entity with `Voice` and one line of UI:
 
 ```sh
-cargo run --example voice --features ui                 # prints a ticket
-cargo run --example voice --features ui -- <ticket>
-cargo run --example webcam --features ui,v4l2           # the same, plus a camera (Linux)
-./scripts/web.sh voice                                  # the same, in a browser tab
+cargo run --example voice                # prints a ticket
+cargo run --example voice -- <ticket>
+cargo run                                # the same, plus a camera and a screen (Linux); also `--example webcam`
+./scripts/web.sh voice                   # the same, in a browser tab
 ```
 
 Or with [just](https://just.systems): `just voice`, `just webcam <ticket>`, `just web webcam`,
@@ -123,9 +138,17 @@ is quiet, not gone. Video that falls more than 150 ms behind a waiting keyframe 
 On a desktop this is cpal, libopus and openh264 (the last two built from source with cmake);
 headphones, since there is no echo cancellation. In a browser it is Web Audio and WebCodecs,
 which do have echo cancellation, and the two decode each other: opus is opus and the H.264 is
-Annex B both ways. Cameras on a desktop are the `v4l2` feature (Linux, through `bevy_v4l2`;
-an app that already runs a `bevy_v4l2` `Webcam` entity can share its capture with
-`VideoInput::new(feed.capture.color_tap())`); elsewhere give the entity a `VideoSource`.
+Annex B both ways. Cameras on a desktop come with `media`: AVFoundation on macOS and Media
+Foundation on Windows, in `media::camera`. On Linux they are the `v4l2` feature: V4L2 capture
+in `media::v4l2`, with a `Webcam` entity that puts a camera on a plane and converts YUV on the
+GPU (zero-copy from the driver's DMA-BUF with the `dmabuf` feature), and an app that already
+runs one can share its capture with `VideoInput::new(feed.capture.color_tap())`. Anywhere
+else, give the entity a `VideoSource` of your own. Screens on a desktop are the `desktop`
+feature, in `media::desktop`: the ScreenCast portal and PipeWire on Linux (a picker for a
+monitor or window; building needs the PipeWire headers and clang), ScreenCaptureKit on macOS
+(the main display; Screen Recording permission takes a relaunch to apply), Desktop
+Duplication on Windows (the primary output, without the pointer); every browser has
+`getDisplayMedia`. Microphones and speakers are cpal everywhere.
 
 ## Browsers: the `wasm` feature
 
@@ -145,7 +168,7 @@ your own project. `tests/wasm.rs` runs two apps in one page against the real rel
 ## Browsers without the relay: the `webrtc` feature
 
 A page cannot accept a QUIC connection, so on its own it reaches every peer through a relay,
-and from far away that is most of the latency in a call. With `features = ["webrtc"]` a page
+and from far away that is most of the latency in a call. With `webrtc` (on by default) a page
 offers a WebRTC connection to every peer it sees and a desktop answers: two data channels,
 one unreliable and unordered for the voice frames and one reliable for video and control,
 carrying the same bytes the QUIC path carries. The browser's own ICE does the hole punching;
@@ -163,9 +186,9 @@ that on to exercise the path locally.
 
 ## Status
 
-Rooms, presence, replication, messages, voice and video work, each with a two-app integration
-test over real iroh (`cargo test --features media,webrtc`); a browser peer joins a native host
-and hears and sees it, over a relay or hole-punched through WebRTC. Next: substrate moving
+Rooms, presence, replication, messages, voice, video and screen sharing work, each with a
+two-app integration test over real iroh (`cargo test`); a browser
+peer joins a native host and hears and sees it, over a relay or hole-punched through WebRTC. Next: substrate moving
 onto this crate. See `PLAN.md`.
 
 ## License

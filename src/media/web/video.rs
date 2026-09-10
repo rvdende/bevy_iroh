@@ -70,6 +70,8 @@ struct CameraSession {
     context: CanvasRenderingContext2d,
     stream: Rc<RefCell<Option<MediaStream>>>,
     last_time: f64,
+    /// The person said no, or the browser could not: nothing will ever arrive.
+    failed: bool,
 }
 
 thread_local! {
@@ -78,14 +80,41 @@ thread_local! {
     static DECODERS: RefCell<HashMap<u64, Decoder>> = RefCell::new(HashMap::new());
 }
 
-/// A camera from `getUserMedia`, as a video source. Frames arrive once the person has said
-/// yes; until then `next_frame` is `None`.
+/// A camera from `getUserMedia`, or a screen from `getDisplayMedia`, as a video source.
+/// Frames arrive once the person has said yes; until then `next_frame` is `None`. When the
+/// track ends (the browser's own "Stop sharing", a camera unplugged) `ended` is true.
 pub struct Camera {
     slot: u64,
 }
 
+/// What to ask the browser for.
+enum Ask {
+    Camera {
+        id: Option<String>,
+        width: u32,
+        height: u32,
+        fps: f32,
+    },
+    Screen,
+}
+
 impl Camera {
     pub fn open(id: Option<&str>, width: u32, height: u32, fps: f32) -> Result<Self, String> {
+        Self::start(Ask::Camera {
+            id: id.map(str::to_string),
+            width,
+            height,
+            fps,
+        })
+    }
+
+    /// The browser's own picker for a screen, window or tab. Must run soon after a click:
+    /// the call needs the page's transient activation.
+    pub fn open_screen() -> Result<Self, String> {
+        Self::start(Ask::Screen)
+    }
+
+    fn start(ask: Ask) -> Result<Self, String> {
         let document = web_sys::window()
             .and_then(|w| w.document())
             .ok_or("no document")?;
@@ -125,23 +154,55 @@ impl Camera {
                     context,
                     stream: stream.clone(),
                     last_time: -1.0,
+                    failed: false,
                 },
             )
         });
-        let id = id.map(str::to_string);
         wasm_bindgen_futures::spawn_local(async move {
-            match acquire(id.as_deref(), width, height, fps).await {
+            let (what, got) = match ask {
+                Ask::Camera {
+                    id,
+                    width,
+                    height,
+                    fps,
+                } => ("camera", acquire(id.as_deref(), width, height, fps).await),
+                Ask::Screen => ("screen", acquire_screen().await),
+            };
+            match got {
                 Ok(s) => {
                     video.set_src_object(Some(&s));
                     let _ = video.play();
                     *stream.borrow_mut() = Some(s);
-                    bevy::log::info!("bevy_iroh: camera open");
+                    bevy::log::info!("bevy_iroh: {what} open");
                 }
-                Err(e) => bevy::log::error!("bevy_iroh: camera: {e}"),
+                Err(e) => {
+                    bevy::log::error!("bevy_iroh: {what}: {e}");
+                    CAMERAS.with_borrow_mut(|cameras| {
+                        if let Some(session) = cameras.get_mut(&slot) {
+                            session.failed = true;
+                        }
+                    });
+                }
             }
         });
         Ok(Self { slot })
     }
+}
+
+async fn acquire_screen() -> Result<MediaStream, String> {
+    let devices = media_devices()?;
+    let video = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&video, &"cursor".into(), &"always".into());
+    let constraints = web_sys::DisplayMediaStreamConstraints::new();
+    constraints.set_video(&video);
+    constraints.set_audio(&JsValue::FALSE);
+    let promise = devices
+        .get_display_media_with_constraints(&constraints)
+        .map_err(describe)?;
+    Ok(JsFuture::from(promise)
+        .await
+        .map_err(describe)?
+        .unchecked_into())
 }
 
 async fn acquire(
@@ -176,6 +237,10 @@ async fn acquire(
 }
 
 impl VideoSource for Camera {
+    fn ended(&self) -> bool {
+        self.track_ended()
+    }
+
     fn next_frame(&mut self) -> Option<Frame> {
         CAMERAS.with_borrow_mut(|cameras| {
             let session = cameras.get_mut(&self.slot)?;
@@ -219,6 +284,29 @@ impl VideoSource for Camera {
                 pixels: Pixels::Rgba(data.0),
                 timestamp_ms: now_ms(),
             })
+        })
+    }
+}
+
+impl Camera {
+    fn track_ended(&self) -> bool {
+        CAMERAS.with_borrow(|cameras| {
+            let Some(session) = cameras.get(&self.slot) else {
+                return true;
+            };
+            if session.failed {
+                return true;
+            }
+            let stream = session.stream.borrow();
+            let Some(stream) = stream.as_ref() else {
+                return false;
+            };
+            let tracks = stream.get_video_tracks();
+            if tracks.length() == 0 {
+                return true;
+            }
+            let track: web_sys::MediaStreamTrack = tracks.get(0).unchecked_into();
+            track.ready_state() == web_sys::MediaStreamTrackState::Ended
         })
     }
 }
@@ -354,6 +442,10 @@ pub(crate) fn start_encoder(
         let mut encoder: Option<WebEncoder> = None;
         while !shared.stop.load(Ordering::Relaxed) {
             let started = web_time::Instant::now();
+            if source.ended() {
+                shared.finished.store(true, Ordering::Relaxed);
+                break;
+            }
             if let Some(frame) = source.next_frame() {
                 shared.saw(&frame);
                 let size = (frame.width, frame.height);

@@ -37,6 +37,11 @@ pub enum Pixels {
 /// call, or `None`.
 pub trait VideoSource: Send + 'static {
     fn next_frame(&mut self) -> Option<VideoFrame>;
+    /// No more frames will ever come: the device went away, or the person stopped sharing.
+    /// The encoder stops and the feed is marked not live.
+    fn ended(&self) -> bool {
+        false
+    }
 }
 
 /// Encoder settings for one published feed.
@@ -104,6 +109,8 @@ pub struct FeedStats {
 /// What an encoder shares with the Bevy side.
 pub(crate) struct EncoderShared {
     pub stop: AtomicBool,
+    /// The source said it was done; see [`VideoSource::ended`].
+    pub finished: AtomicBool,
     /// The picture's size as `width << 32 | height`, once known.
     pub size: AtomicU64,
     pub encoded: AtomicU64,
@@ -116,6 +123,7 @@ impl EncoderShared {
     pub fn new(preview: bool) -> Self {
         Self {
             stop: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             size: AtomicU64::new(0),
             encoded: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -187,6 +195,91 @@ impl VideoFrame {
     }
 }
 
+/// Packed 4:2:2 rows (`Y0 U Y1 V`, what V4L2 calls `YUYV`, Windows `YUY2` and macOS `yuvs`),
+/// `stride` bytes apart, into the planar 4:2:0 the encoder takes. Chroma is averaged over
+/// each pair of rows. The planes are cleared and resized; a short buffer leaves the rest black.
+pub fn yuyv_to_i420(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    y: &mut Vec<u8>,
+    u: &mut Vec<u8>,
+    v: &mut Vec<u8>,
+) {
+    let (cw, ch) = (w / 2, h / 2);
+    y.clear();
+    y.resize(w * h, 0);
+    u.clear();
+    u.resize(cw * ch, 128);
+    v.clear();
+    v.resize(cw * ch, 128);
+    for row in 0..h {
+        let Some(line) = src.get(row * stride..row * stride + w * 2) else {
+            break;
+        };
+        let quads = line.as_chunks::<4>().0;
+        let y_row = &mut y[row * w..(row + 1) * w];
+        for (i, quad) in quads.iter().enumerate() {
+            y_row[2 * i] = quad[0];
+            y_row[2 * i + 1] = quad[2];
+        }
+        let c_row = row / 2;
+        if c_row >= ch {
+            continue;
+        }
+        let u_row = &mut u[c_row * cw..(c_row + 1) * cw];
+        let v_row = &mut v[c_row * cw..(c_row + 1) * cw];
+        if row % 2 == 0 {
+            for (i, quad) in quads.iter().enumerate() {
+                u_row[i] = quad[1];
+                v_row[i] = quad[3];
+            }
+        } else {
+            for (i, quad) in quads.iter().enumerate() {
+                u_row[i] = ((u_row[i] as u16 + quad[1] as u16).div_ceil(2)) as u8;
+                v_row[i] = ((v_row[i] as u16 + quad[3] as u16).div_ceil(2)) as u8;
+            }
+        }
+    }
+}
+
+/// A luma plane of `h` rows then an interleaved `UV` plane of `h / 2` rows, both `stride`
+/// bytes apart, into planar 4:2:0. Same conventions as [`yuyv_to_i420`].
+pub fn nv12_to_i420(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    y: &mut Vec<u8>,
+    u: &mut Vec<u8>,
+    v: &mut Vec<u8>,
+) {
+    let (cw, ch) = (w / 2, h / 2);
+    y.clear();
+    y.resize(w * h, 0);
+    u.clear();
+    u.resize(cw * ch, 128);
+    v.clear();
+    v.resize(cw * ch, 128);
+    for row in 0..h {
+        let Some(line) = src.get(row * stride..row * stride + w) else {
+            break;
+        };
+        y[row * w..(row + 1) * w].copy_from_slice(line);
+    }
+    let uv = stride * h;
+    for c_row in 0..ch {
+        let Some(line) = src.get(uv + c_row * stride..uv + c_row * stride + cw * 2) else {
+            break;
+        };
+        for (i, pair) in line.as_chunks::<2>().0.iter().enumerate() {
+            u[c_row * cw + i] = pair[0];
+            v[c_row * cw + i] = pair[1];
+        }
+    }
+}
+
 /// BT.601 limited range, which is what cameras hand out.
 fn i420_to_rgba(y: &[u8], u: &[u8], v: &[u8], w: usize, h: usize, out: &mut [u8]) {
     let cw = w / 2;
@@ -241,6 +334,10 @@ pub(crate) fn run_encoder(
     let mut reported = false;
     while !shared.stop.load(Ordering::Relaxed) {
         let started = Instant::now();
+        if source.ended() {
+            shared.finished.store(true, Ordering::Relaxed);
+            break;
+        }
         let Some(frame) = source.next_frame() else {
             std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
@@ -748,6 +845,48 @@ impl VideoSource for TestPattern {
             pixels: Pixels::Rgba(data),
             timestamp_ms: elapsed.as_millis() as u64,
         })
+    }
+}
+
+#[cfg(test)]
+mod planar_tests {
+    use super::*;
+
+    #[test]
+    fn yuyv_splits_luma_and_averages_chroma_over_row_pairs() {
+        // 4x2: row 0 has U=10,V=20 then U=30,V=40; row 1 has U=20,V=40 then U=50,V=60.
+        let src = [
+            1, 10, 2, 20, 3, 30, 4, 40, //
+            5, 20, 6, 40, 7, 50, 8, 60,
+        ];
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        yuyv_to_i420(&src, 4, 2, 8, &mut y, &mut u, &mut v);
+        assert_eq!(y, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(u, [15, 40]);
+        assert_eq!(v, [30, 50]);
+    }
+
+    #[test]
+    fn yuyv_honours_a_padded_stride_and_stops_at_a_short_buffer() {
+        let src = [1, 10, 2, 20, 99, 99, 99, 99, 3, 10, 4, 20];
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        yuyv_to_i420(&src, 2, 4, 8, &mut y, &mut u, &mut v);
+        assert_eq!(y, [1, 2, 3, 4, 0, 0, 0, 0]);
+        assert_eq!(u.len(), 2);
+    }
+
+    #[test]
+    fn nv12_deinterleaves_chroma() {
+        let src = [
+            1, 2, 3, 4, //
+            5, 6, 7, 8, //
+            10, 20, 30, 40, // U V U V
+        ];
+        let (mut y, mut u, mut v) = (Vec::new(), Vec::new(), Vec::new());
+        nv12_to_i420(&src, 4, 2, 4, &mut y, &mut u, &mut v);
+        assert_eq!(y, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(u, [10, 30]);
+        assert_eq!(v, [20, 40]);
     }
 }
 

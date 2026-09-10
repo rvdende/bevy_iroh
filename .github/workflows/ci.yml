@@ -17,8 +17,34 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Native dependencies (cpal, gilrs, cmake for libopus and openh264)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev cmake libpipewire-0.3-dev clang
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --features ui,webrtc,v4l2 --all-targets -- -D warnings
-      - run: cargo test --features ui,webrtc,v4l2
-      - run: cargo check --target wasm32-unknown-unknown --features ui,wasm,webrtc --examples
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo check --target wasm32-unknown-unknown --features wasm --examples
+
+  # The Windows backends (Media Foundation, Desktop Duplication) type-check from Linux with the
+  # mingw toolchain; openh264 and libopus build with it too.
+  windows-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake mingw-w64
+      - run: cargo clippy --target x86_64-pc-windows-gnu --no-default-features --features media,ui,desktop,webrtc -- -D warnings
+
+  # The macOS backends (AVFoundation, ScreenCaptureKit) need the SDK, so a real runner.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --no-default-features --features media,ui,desktop,webrtc -- -D warnings
+      - run: cargo test --no-default-features --features media,ui,desktop,webrtc

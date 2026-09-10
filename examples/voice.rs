@@ -1,8 +1,8 @@
 //! Voice chat: everyone in the room is a sphere, with a bar over it that rises as they speak.
 //!
 //! ```sh
-//! cargo run --example voice --features ui                 # prints a ticket
-//! cargo run --example voice --features ui -- <ticket>
+//! cargo run --example voice                 # prints a ticket
+//! cargo run --example voice -- <ticket>
 //! ./scripts/web.sh voice                                  # the same, in a browser tab
 //! ```
 //!
@@ -136,7 +136,7 @@ fn print_ticket(tickets: Query<&Ticket, Added<Ticket>>) {
         #[cfg(target_arch = "wasm32")]
         bevy_iroh::web::share_ticket_in_url("join", &ticket.0);
         info!(
-            "join with:\n\n    cargo run --example voice --features ui -- {}\n\nor in a browser: http://localhost:8000/?join={}\n",
+            "join with:\n\n    cargo run --example voice -- {}\n\nor in a browser: http://localhost:8000/?join={}\n",
             ticket.0, ticket.0
         );
     }
