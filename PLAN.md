@@ -7,7 +7,7 @@ local feeds, per-subscriber video fan-out with a 150 ms catch-up rule, and the `
 (`MediaPanel`, `VoiceIndicator`). `examples/voice.rs` and `examples/webcam.rs` replace
 `conference`. The `webrtc` feature (branch `webrtc`) reaches browsers over hole-punched data
 channels instead of the relay: `str0m` natively, `RTCPeerConnection` in a page, signalling over
-the room; verified desktop to browser across two machines on a LAN. 0.5.0 (2026-09-10): the
+the room; verified desktop to browser across two machines on a LAN. 0.4.4 (2026-09-10): the
 `desktop` feature shares a screen: `VideoInput::desktop()` + `MediaSettings::share_screen`,
 through the ScreenCast portal + PipeWire on Linux (other platforms report unsupported) or
 `getDisplayMedia` in a page, fitted into the
