@@ -65,13 +65,10 @@
     });
   </script>
   <script type="module">
-    import init from "./app.js";
-    init().catch((e) => {
-      // winit uses an exception for control flow once the event loop is running.
-      if (!String(e).includes("Using exceptions for control flow")) {
-        console.error(e);
-      }
-    });
+    // The loader fetches app_bg.wasm with a progress bar, then starts the example. The size
+    // is written in by scripts/site.sh so the bar is right behind a gzipping server.
+    import { boot } from "./loader.js";
+    boot({ canvas: document.getElementById("bevy"), size: "WASM_SIZE", title: "bevy_iroh EXAMPLE" });
   </script>
 </body>
 </html>

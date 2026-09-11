@@ -11,14 +11,10 @@
 <body>
   <canvas id="bevy"></canvas>
   <script type="module">
-    // Built by `scripts/web.sh <example>`: wasm-bindgen output of that example.
-    import init from "./app.js";
-    init().catch((e) => {
-      // winit uses an exception for control flow once the event loop is running.
-      if (!String(e).includes("Using exceptions for control flow")) {
-        console.error(e);
-      }
-    });
+    // Built by `scripts/web.sh <example>`: wasm-bindgen output of that example, loaded with a
+    // progress bar. The local server sends no content encoding, so the bar reads the length.
+    import { boot } from "./loader.js";
+    boot({ canvas: document.getElementById("bevy") });
   </script>
 </body>
 </html>

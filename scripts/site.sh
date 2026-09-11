@@ -22,7 +22,9 @@ for example in cube voice webcam; do
       --enable-sign-ext --enable-mutable-globals --enable-multivalue \
       -o "site/$example/app_bg.wasm" "site/$example/app_bg.wasm"
   fi
-  sed "s/EXAMPLE/$example/g" web/demo.html > "site/$example/index.html"
+  cp web/loader.js "site/$example/"
+  size=$(wc -c < "site/$example/app_bg.wasm" | tr -d ' ')
+  sed "s/EXAMPLE/$example/g; s/WASM_SIZE/$size/g" web/demo.html > "site/$example/index.html"
   cp "examples/$example.rs" "site/$example/source.rs"
 done
 touch site/.nojekyll
