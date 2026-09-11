@@ -76,7 +76,7 @@ codec's `verify` runs before its `decode`.
 ## Voice and video: the `media` feature
 
 ```toml
-bevy_iroh = "0.4"   # every feature but `wasm` is on by default
+bevy_iroh = "0.4"   # every feature but the browser ones, `wasm` and `web-demo`, is on by default
 ```
 
 That includes `demo`, which gives `cargo run` in a checkout a window of its own (Bevy's
@@ -169,7 +169,11 @@ The core transport runs in a page as it is: iroh reaches the relays over WebSock
 `wasm` feature adds an identity kept in `localStorage` (`web::stored_identity`) and the ticket
 out of the address bar (`web::ticket_from_url("join")`). `scripts/web.sh [example]` builds an
 example for the browser and serves it; open `http://localhost:8000/?join=<ticket>` from a
-native `voice`, `webcam` or `host` run. A page needs a secure context, https or localhost,
+native `voice`, `webcam` or `host` run. It builds with `--no-default-features --features
+web-demo`, which is `wasm` plus the media features and only the Bevy the examples reach
+rather than Bevy's whole default set; that is a third of the download, and an app of your
+own wants the same kind of list. `scripts/site.sh` goes further for the published demos,
+rebuilding std with panics as plain traps, which needs nightly and `rust-src`. A page needs a secure context, https or localhost,
 for its microphone and camera and for iroh's relay probes; `HTTPS=1 ./scripts/web.sh voice`
 serves a self-signed certificate for testing from another machine on the LAN. A browser lists
 devices only after its permission prompt: "Devices" asks. WebCodecs is behind

@@ -10,8 +10,17 @@ profile="${1:-pages}"
 rm -rf site && mkdir -p site
 cp README.md web/site.html site/ && mv site/site.html site/index.html
 cp PLAN.md site/ 2>/dev/null || true
+# The pages profile also rebuilds std with panics as plain traps and no file:line in them,
+# which is another 6% off; that needs the nightly flags below and `rust-src`. RUSTFLAGS
+# replaces the list in .cargo/config.toml, so the WebCodecs cfg is repeated here.
+if [ "$profile" = pages ]; then
+  export RUSTFLAGS="--cfg=web_sys_unstable_apis -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none"
+  set -- -Zbuild-std=std,panic_abort
+else
+  set --
+fi
 for example in cube voice webcam; do
-  cargo build --profile "$profile" --example "$example" --target wasm32-unknown-unknown --features wasm
+  cargo build --profile "$profile" --example "$example" --target wasm32-unknown-unknown --no-default-features --features web-demo "$@"
   mkdir -p "site/$example"
   wasm-bindgen --target web --no-typescript --out-dir "site/$example" --out-name app \
     "target/wasm32-unknown-unknown/$profile/examples/$example.wasm"

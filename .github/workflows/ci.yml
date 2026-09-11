@@ -21,7 +21,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: cargo check --target wasm32-unknown-unknown --features wasm --examples
+      - run: cargo check --target wasm32-unknown-unknown --no-default-features --features web-demo --examples
 
   # The Windows backends (Media Foundation, Desktop Duplication) type-check from Linux with the
   # mingw toolchain; openh264 and libopus build with it too.

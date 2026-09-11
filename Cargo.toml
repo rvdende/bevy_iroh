@@ -87,6 +87,30 @@ webrtc = ["media", "dep:str0m"]
 ## What only a browser has: an identity in localStorage and the ticket from the page URL. The
 ## core transport runs on wasm32 without this.
 wasm = ["dep:web-sys", "dep:wasm-bindgen"]
+## The examples in a browser, as small as they go: `wasm` plus the media features and only the
+## Bevy that the examples reach (a window, 3D, UI, text, picking), instead of Bevy's whole
+## default set. `scripts/web.sh` and `scripts/site.sh` build with `--no-default-features
+## --features web-demo`; it takes a third off the download.
+web-demo = [
+    "wasm",
+    "ui",
+    "desktop",
+    "webrtc",
+    "bevy/async_executor",
+    "bevy/bevy_winit",
+    "bevy/webgl2",
+    "bevy/bevy_log",
+    "bevy/bevy_window",
+    "bevy/bevy_render",
+    "bevy/bevy_core_pipeline",
+    "bevy/bevy_camera",
+    "bevy/bevy_light",
+    "bevy/bevy_picking",
+    "bevy/bevy_input_focus",
+    "bevy/tonemapping_luts",
+    "bevy/ktx2",
+    "bevy/zstd_rust",
+]
 ## The `bevy_iroh` binary, which is the webcam example: `cargo run` opens a window with voice,
 ## a camera and a screen. This is Bevy's default plugin set with a window on Wayland and X11;
 ## a library user with their own Bevy does not need it (`default-features = false`).
@@ -211,7 +235,9 @@ wasm-bindgen-test = "0.3"
 web-time = "1"
 
 [dev-dependencies]
-bevy = { version = "0.19", features = ["wayland", "x11"] }
+# No defaults: the examples get their Bevy through this crate's features (`demo` natively,
+# `web-demo` in a browser), so a browser build is not dragged up to Bevy's full default set.
+bevy = { version = "0.19", default-features = false, features = ["wayland", "x11"] }
 tempfile = "3"
 rand = "0.10"
 

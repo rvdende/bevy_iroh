@@ -41,7 +41,7 @@ check:
     cargo fmt --all -- --check
     cargo clippy --all-targets -- -D warnings
     cargo test
-    cargo check --target wasm32-unknown-unknown --features wasm --examples
+    cargo check --target wasm32-unknown-unknown --no-default-features --features web-demo --examples
 
 # `just release 0.5.0`, on a clean main: the checks, the version in Cargo.toml, a commit, the
 # tag `v0.5.0` and a push. The publish workflow takes it from there.
