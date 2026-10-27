@@ -39,7 +39,7 @@ jobs:
         run: |
           wanted=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
           have=$(wasm-bindgen --version | awk '{print $2}')
-          if [ "$wanted" != "$have" ]; then cargo install wasm-bindgen-cli --version "$wanted" --locked; fi
+          if [ "$wanted" != "$have" ]; then cargo install wasm-bindgen-cli --version "$wanted" --locked --force; fi
       - name: Build the site
         run: ./scripts/site.sh pages
       - uses: actions/configure-pages@v5
