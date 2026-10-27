@@ -116,6 +116,10 @@ pub struct Iroh {
     stop: Arc<AtomicBool>,
     #[cfg(not(target_arch = "wasm32"))]
     runtime: tokio::runtime::Handle,
+    /// The network thread: it ends once the node is shut down, its endpoint closed and off the
+    /// relay.
+    #[cfg(not(target_arch = "wasm32"))]
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for Iroh {
@@ -237,7 +241,11 @@ pub struct IrohPlugin {
     pub heartbeat: Duration,
     /// Replicate `Transform` at 20 Hz with smoothing. Off, register your own transform codec.
     pub replicate_transform: bool,
-    protocols: Mutex<Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>>,
+    /// Start the node as soon as the plugin is added. Off, the plugin only registers its
+    /// systems and nothing touches the network until [`StartIroh`] is queued: an app that
+    /// connects only when its user asks.
+    pub autostart: bool,
+    protocols: Mutex<Vec<(Vec<u8>, Protocol)>>,
 }
 
 impl Default for IrohPlugin {
@@ -248,9 +256,16 @@ impl Default for IrohPlugin {
             display_name: String::new(),
             heartbeat: Duration::from_secs(5),
             replicate_transform: true,
+            autostart: true,
             protocols: Mutex::new(Vec::new()),
         }
     }
+}
+
+/// A handler for an extra ALPN: one to hand over once, or a way to make one for each start.
+enum Protocol {
+    Once(Option<Box<dyn DynProtocolHandler>>),
+    Factory(Box<dyn Fn() -> Box<dyn DynProtocolHandler> + Send + Sync>),
 }
 
 impl IrohPlugin {
@@ -269,8 +284,16 @@ impl IrohPlugin {
         self
     }
 
+    pub fn with_autostart(mut self, autostart: bool) -> Self {
+        self.autostart = autostart;
+        self
+    }
+
     /// Accept connections on another ALPN, on the same endpoint. How media, or anything else
     /// that is a stream rather than a message, rides along.
+    ///
+    /// The handler serves the first node only: a node started again after [`StopIroh`] goes
+    /// without it. [`IrohPlugin::with_protocol_factory`] serves every one.
     pub fn with_protocol(
         self,
         alpn: impl AsRef<[u8]>,
@@ -279,8 +302,183 @@ impl IrohPlugin {
         self.protocols
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((alpn.as_ref().to_vec(), handler.into()));
+            .push((alpn.as_ref().to_vec(), Protocol::Once(Some(handler.into()))));
         self
+    }
+
+    /// [`IrohPlugin::with_protocol`] with a fresh handler for each node, so the protocol
+    /// survives stopping and starting again.
+    pub fn with_protocol_factory(
+        self,
+        alpn: impl AsRef<[u8]>,
+        make: impl Fn() -> Box<dyn DynProtocolHandler> + Send + Sync + 'static,
+    ) -> Self {
+        self.protocols
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((alpn.as_ref().to_vec(), Protocol::Factory(Box::new(make))));
+        self
+    }
+}
+
+/// Starts the node, if it is not running: what [`IrohPlugin::autostart`] does when the plugin
+/// is added, and how an app with it off connects later. The node keeps its identity across
+/// starts (an ephemeral one too). A failure is logged and left in [`StartError`].
+///
+/// On native targets this waits for the endpoint to bind, which takes a moment, not the
+/// relay: that is reached in the background.
+#[derive(Debug, Clone, Default)]
+pub struct StartIroh {
+    /// Start as this identity instead of the plugin's (an app that switched accounts while
+    /// off the network); later starts keep it.
+    pub identity: Option<Identity>,
+    /// And under this name.
+    pub display_name: Option<String>,
+}
+
+impl Command for StartIroh {
+    type Out = ();
+
+    fn apply(self, world: &mut World) {
+        if world.contains_resource::<Iroh>() {
+            return;
+        }
+        if let Some(mut launcher) = world.get_resource_mut::<Launcher>() {
+            if let Some(identity) = self.identity {
+                launcher.identity = identity;
+            }
+            if let Some(name) = self.display_name {
+                launcher.display_name = name;
+            }
+        }
+        start(world);
+    }
+}
+
+/// Stops the node: [`Iroh`] goes away and the network thread winds down. Every room says
+/// goodbye and is left; its entity stays, [`RoomStatus::Failed`](crate::room::RoomStatus),
+/// for the app to despawn or replace, and its [`Peer`](crate::room::Peer)s leave
+/// ([`PeerLeft`](crate::room::PeerLeft)). Tasks still running on the network never answer.
+pub struct StopIroh;
+
+impl Command for StopIroh {
+    type Out = ();
+
+    fn apply(self, world: &mut World) {
+        if !world.contains_resource::<Iroh>() {
+            return;
+        }
+        crate::room::leave_all(world, "networking is off");
+        #[allow(unused_mut)]
+        let mut iroh = world.remove_resource::<Iroh>();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(thread), Some(mut launcher)) = (
+            iroh.as_mut().and_then(|i| i.thread.take()),
+            world.get_resource_mut::<Launcher>(),
+        ) {
+            launcher.stopping = Some(thread);
+        }
+        drop(iroh);
+        world.resource_mut::<NetStats>().0 = None;
+    }
+}
+
+/// Why the last [`StartIroh`] (or the plugin's own start) failed. Removed when a node starts.
+#[derive(Resource, Debug, Clone)]
+pub struct StartError(pub String);
+
+/// What a start needs, kept from the plugin so the node can start at any time, and again.
+#[derive(Resource)]
+struct Launcher {
+    identity: Identity,
+    relays: Relays,
+    display_name: String,
+    heartbeat: Duration,
+    protocols: Vec<(Vec<u8>, Protocol)>,
+    fast_paths: Arc<net::FastPaths>,
+    /// The node stopped last, still shutting down: the next one waits for it, so the relay
+    /// never sees two endpoints with one key (it keeps one and drops the other).
+    #[cfg(not(target_arch = "wasm32"))]
+    stopping: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How long a start waits for the node before it to shut down.
+#[cfg(not(target_arch = "wasm32"))]
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+
+impl Launcher {
+    fn config(&mut self) -> Config {
+        let secret = match &self.identity {
+            Identity::Ephemeral => SecretKey::generate(),
+            Identity::Key(key) => key.clone(),
+            Identity::File(path) => match net::identity::load_or_create(path) {
+                Ok(key) => key,
+                Err(why) => {
+                    error!("bevy_iroh: identity: {why:#}; using an ephemeral key");
+                    SecretKey::generate()
+                }
+            },
+        };
+        // The same key next time: peers recognise a node that comes back.
+        if matches!(self.identity, Identity::Ephemeral) {
+            self.identity = Identity::Key(secret.clone());
+        }
+        let protocols = self
+            .protocols
+            .iter_mut()
+            .filter_map(|(alpn, protocol)| {
+                let handler = match protocol {
+                    Protocol::Once(handler) => handler.take(),
+                    Protocol::Factory(make) => Some(make()),
+                };
+                if handler.is_none() {
+                    warn!(
+                        "bevy_iroh: no handler for ALPN {} on this start (with_protocol serves one node)",
+                        String::from_utf8_lossy(alpn)
+                    );
+                }
+                handler.map(|h| (alpn.clone(), h))
+            })
+            .collect();
+        Config {
+            secret_key: secret,
+            relays: self.relays.clone(),
+            protocols,
+            fast_paths: self.fast_paths.clone(),
+        }
+    }
+}
+
+fn start(world: &mut World) {
+    if world.contains_resource::<Iroh>() {
+        return;
+    }
+    let Some(mut launcher) = world.get_resource_mut::<Launcher>() else {
+        return;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(stopping) = launcher.stopping.take() {
+        let since = std::time::Instant::now();
+        while !stopping.is_finished() && since.elapsed() < SHUTDOWN_WAIT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !stopping.is_finished() {
+            warn!("bevy_iroh: the last node is still shutting down; starting anyway");
+        }
+    }
+    let config = launcher.config();
+    let (name, every) = (launcher.display_name.clone(), launcher.heartbeat);
+    match spawn(config, name.clone()) {
+        Ok(iroh) => {
+            info!("bevy_iroh: node {}", iroh.id().fmt_short());
+            iroh.send(ToNet::Presence { name, every });
+            world.remove_resource::<StartError>();
+            world.insert_resource(iroh);
+        }
+        Err(why) => {
+            error!("bevy_iroh: {why}; networking is off");
+            world.insert_resource(StartError(why));
+        }
     }
 }
 
@@ -309,17 +507,6 @@ pub(crate) struct Timing {
 
 impl Plugin for IrohPlugin {
     fn build(&self, app: &mut App) {
-        let secret = match &self.identity {
-            Identity::Ephemeral => SecretKey::generate(),
-            Identity::Key(key) => key.clone(),
-            Identity::File(path) => match net::identity::load_or_create(path) {
-                Ok(key) => key,
-                Err(why) => {
-                    error!("bevy_iroh: identity: {why:#}; using an ephemeral key");
-                    SecretKey::generate()
-                }
-            },
-        };
         #[allow(unused_mut)]
         let mut protocols =
             std::mem::take(&mut *self.protocols.lock().unwrap_or_else(|e| e.into_inner()));
@@ -327,29 +514,29 @@ impl Plugin for IrohPlugin {
         #[cfg(feature = "media")]
         let hub = {
             let hub = Arc::new(crate::media::MediaHub::new(fast_paths.clone()));
+            let for_handler = hub.clone();
             protocols.push((
                 crate::media::ALPN.to_vec(),
-                Box::new(crate::media::transport::MediaHandler { hub: hub.clone() })
-                    as Box<dyn DynProtocolHandler>,
+                Protocol::Factory(Box::new(move || {
+                    Box::new(crate::media::transport::MediaHandler {
+                        hub: for_handler.clone(),
+                    }) as Box<dyn DynProtocolHandler>
+                })),
             ));
             hub
         };
-        let config = Config {
-            secret_key: secret,
+        app.insert_resource(Launcher {
+            identity: self.identity.clone(),
             relays: self.relays.clone(),
+            display_name: self.display_name.clone(),
+            heartbeat: self.heartbeat,
             protocols,
             fast_paths,
-        };
-        match spawn(config, self.display_name.clone()) {
-            Ok(iroh) => {
-                info!("bevy_iroh: node {}", iroh.id().fmt_short());
-                iroh.send(ToNet::Presence {
-                    name: self.display_name.clone(),
-                    every: self.heartbeat,
-                });
-                app.insert_resource(iroh);
-            }
-            Err(why) => error!("bevy_iroh: {why}; networking is off"),
+            #[cfg(not(target_arch = "wasm32"))]
+            stopping: None,
+        });
+        if self.autostart {
+            start(app.world_mut());
         }
         app.insert_resource(Timing {
             heartbeat: self.heartbeat,
@@ -420,7 +607,7 @@ fn spawn(config: Config, display_name: String) -> Result<Iroh, String> {
     let (ready, started) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("iroh".into())
         .spawn(move || {
             // Two workers: iroh's work is I/O, and this runtime shares the machine with the
@@ -459,6 +646,7 @@ fn spawn(config: Config, display_name: String) -> Result<Iroh, String> {
         from_net,
         stop,
         runtime,
+        thread: Some(thread),
     })
 }
 

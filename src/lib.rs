@@ -28,7 +28,9 @@ pub use net::{
     FastPaths, Relays, RoomTicket, Via,
     stats::{Link, Stats},
 };
-pub use node::{Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats};
+pub use node::{
+    Identity, Iroh, IrohPlugin, IrohSet, IrohTask, NetStats, StartError, StartIroh, StopIroh,
+};
 
 pub mod prelude {
     #[cfg(all(feature = "ui", feature = "desktop"))]
@@ -46,7 +48,8 @@ pub mod prelude {
     #[cfg(feature = "webrtc")]
     pub use crate::media::{MediaPath, RtcSettings};
     pub use crate::{
-        Identity, Iroh, IrohPlugin, IrohSet, Link, NetStats, Relays, RoomTicket, Stats, Via,
+        Identity, Iroh, IrohPlugin, IrohSet, Link, NetStats, Relays, RoomTicket, StartError,
+        StartIroh, Stats, StopIroh, Via,
         message::{MessageAppExt, NetSender, Received},
         replicate::{
             Authority, Codec, DecodeCx, EncodeCx, Glide, InRoom, NetId, Owner, Rate, Rejected,

@@ -417,6 +417,32 @@ fn presence_out(
     }
 }
 
+/// Every room left at once, the node about to stop ([`StopIroh`](crate::StopIroh)): the goodbyes
+/// go out while it still can, the peers leave, and the rooms stay, failed, for the app to
+/// despawn or replace.
+pub(crate) fn leave_all(world: &mut World, why: &str) {
+    let peers: Vec<(Entity, Entity, EndpointId)> = world
+        .query::<(Entity, &Peer, &MemberOf)>()
+        .iter(world)
+        .map(|(peer, p, member_of)| (member_of.0, peer, p.id))
+        .collect();
+    for (room, peer, id) in peers {
+        world.write_message(PeerLeft { room, peer, id });
+        world.despawn(peer);
+    }
+    let rooms: Vec<Entity> = world
+        .query_filtered::<Entity, With<Room>>()
+        .iter(world)
+        .collect();
+    for room in rooms {
+        // Removing the topic says goodbye and leaves it (`leave_on_despawn`).
+        world
+            .entity_mut(room)
+            .remove::<(RoomTopic, Presence, RoomRequest)>()
+            .insert(RoomStatus::Failed(why.into()));
+    }
+}
+
 /// Despawning a room leaves its topic, so nothing in it ghosts on peers.
 fn leave_on_despawn(
     remove: On<Remove, RoomTopic>,
