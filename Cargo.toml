@@ -44,6 +44,7 @@ ui = [
     "bevy/bevy_ui",
     "bevy/bevy_ui_render",
     "bevy/ui_picking",
+    "bevy/bevy_ui_widgets",
     "bevy/bevy_text",
     "bevy/default_font",
     "bevy/bevy_pbr",
@@ -117,7 +118,7 @@ web-demo = [
 demo = ["ui", "desktop", "webrtc", "v4l2", "bevy/default", "bevy/wayland", "bevy/x11"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["bevy_log", "std"] }
+bevy = { version = "0.20", default-features = false, features = ["bevy_log", "std"] }
 iroh = "1.1"
 iroh-gossip = "0.101"
 postcard = { version = "1.1", features = ["alloc"] }
@@ -143,7 +144,7 @@ v4l = { version = "0.14", optional = true }
 libc = { version = "0.2", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
 zune-jpeg = { version = "0.5", optional = true }
-wgpu = { version = "29", optional = true }
+wgpu = { version = "30", optional = true }
 ash = { version = "0.38", optional = true }
 # desktop
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"], optional = true }
@@ -237,7 +238,7 @@ web-time = "1"
 [dev-dependencies]
 # No defaults: the examples get their Bevy through this crate's features (`demo` natively,
 # `web-demo` in a browser), so a browser build is not dragged up to Bevy's full default set.
-bevy = { version = "0.19", default-features = false, features = ["wayland", "x11"] }
+bevy = { version = "0.20", default-features = false, features = ["wayland", "x11"] }
 tempfile = "3"
 rand = "0.10"
 

@@ -126,7 +126,7 @@ fn setup(
 }
 
 fn on_add_avatar(
-    add: On<Add, Avatar>,
+    add: On<Add<Avatar>>,
     avatars: Query<&Avatar>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

@@ -424,6 +424,8 @@ pub fn import_dmabuf_texture(
                 usage: desc.usage,
                 view_formats: &[],
             },
+            // What wgpu 29 always assumed: no layout the first barrier has to keep.
+            wgpu::TextureUses::UNINITIALIZED,
         )
     };
     Ok(texture)

@@ -355,7 +355,7 @@ pub(crate) fn on_peer_left(
 /// Leaving a room drops the replicas that came from it, and forgets that local entities were
 /// announced there.
 pub(crate) fn on_room_left(
-    remove: On<Remove, RoomTopic>,
+    remove: On<Remove<RoomTopic>>,
     mut commands: Commands,
     topics: Query<&RoomTopic>,
     mut ids: ResMut<NetIds>,

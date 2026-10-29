@@ -445,7 +445,7 @@ pub(crate) fn leave_all(world: &mut World, why: &str) {
 
 /// Despawning a room leaves its topic, so nothing in it ghosts on peers.
 fn leave_on_despawn(
-    remove: On<Remove, RoomTopic>,
+    remove: On<Remove<RoomTopic>>,
     iroh: Option<Res<Iroh>>,
     mut rooms: ResMut<Rooms>,
     topics: Query<&RoomTopic>,

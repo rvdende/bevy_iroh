@@ -272,11 +272,11 @@ pub struct WebcamFeed {
     no_barrier: bool,
 }
 
-impl SyncComponent for WebcamFeed {
+impl SyncComponent<RenderApp> for WebcamFeed {
     type Target = WebcamFeed;
 }
 
-impl ExtractComponent for WebcamFeed {
+impl ExtractComponent<RenderApp> for WebcamFeed {
     type QueryData = &'static WebcamFeed;
     type QueryFilter = ();
     type Out = WebcamFeed;
@@ -838,7 +838,13 @@ fn verify_copy(
         warn!("verify: poll failed: {e:?}");
         return;
     }
-    let gpu_bytes = slice.get_mapped_range();
+    let gpu_bytes = match slice.get_mapped_range() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("verify: mapping failed: {e:?}");
+            return;
+        }
+    };
     let cpu_bytes = &shared.capture.buffers()[frame.index as usize].as_slice()[..total as usize];
     let mut bad_lines = 0u64;
     let mut bad_rows = std::collections::BTreeSet::new();

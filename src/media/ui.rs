@@ -10,7 +10,11 @@
 //! Plain Bevy UI, no theme: a dark panel and a green that is the same green everywhere, so
 //! the bar in your corner and the bar over somebody's head read as one instrument.
 
-use bevy::{picking::Pickable, prelude::*};
+use bevy::{
+    picking::{Pickable, hover::Hovered},
+    prelude::*,
+    ui_widgets::{Activate, Button},
+};
 
 use super::{
     AudioDevices, CameraChoice, CameraDevices, MediaSettings, MicLevel, MicrophoneChoice,
@@ -29,8 +33,8 @@ const TEXT: Color = Color::srgb(0.92, 0.92, 0.94);
 const TEXT_DIM: Color = Color::srgb(0.6, 0.6, 0.65);
 const MUTED: Color = Color::srgb(0.9, 0.35, 0.3);
 
-/// Registers the systems behind every widget here. Needs `DefaultPlugins` (or the UI and
-/// picking plugins) and `IrohPlugin` with the `media` feature.
+/// Registers the systems behind every widget here. Needs `DefaultPlugins` (or the UI, picking
+/// and UI widget plugins) and `IrohPlugin` with the `media` feature.
 pub struct MediaUiPlugin;
 
 impl Plugin for MediaUiPlugin {
@@ -43,10 +47,6 @@ impl Plugin for MediaUiPlugin {
                 build_mute_buttons,
                 build_camera_buttons,
                 build_pickers,
-                toggle_panels,
-                mute_clicks,
-                camera_clicks,
-                picker_clicks,
                 row_hover,
                 sync_meters,
                 sync_mute_buttons,
@@ -54,12 +54,14 @@ impl Plugin for MediaUiPlugin {
                 build_indicators,
                 sync_indicators,
             ),
-        );
+        )
+        .add_observer(toggle_panels)
+        .add_observer(mute_clicks)
+        .add_observer(camera_clicks)
+        .add_observer(picker_clicks);
         #[cfg(feature = "desktop")]
-        app.add_systems(
-            Update,
-            (build_screen_buttons, screen_clicks, sync_screen_buttons),
-        );
+        app.add_systems(Update, (build_screen_buttons, sync_screen_buttons))
+            .add_observer(screen_clicks);
     }
 }
 
@@ -157,6 +159,7 @@ fn build_panels(mut commands: Commands, panels: Query<(Entity, &MediaPanel), Add
                         .spawn((
                             DevicesButton(drawer),
                             Button,
+                            Hovered::default(),
                             Node {
                                 padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
                                 border_radius: BorderRadius::all(Val::Px(4.0)),
@@ -176,20 +179,19 @@ fn build_panels(mut commands: Commands, panels: Query<(Entity, &MediaPanel), Add
 }
 
 fn toggle_panels(
-    buttons: Query<(&Interaction, &DevicesButton), Changed<Interaction>>,
+    activate: On<Activate>,
+    buttons: Query<&DevicesButton>,
     mut drawers: Query<&mut Node, With<PickerDrawer>>,
 ) {
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        if let Ok(mut node) = drawers.get_mut(button.0) {
-            node.display = if node.display == Display::None {
-                Display::Flex
-            } else {
-                Display::None
-            };
-        }
+    let Ok(button) = buttons.get(activate.entity) else {
+        return;
+    };
+    if let Ok(mut node) = drawers.get_mut(button.0) {
+        node.display = if node.display == Display::None {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -269,6 +271,7 @@ fn build_mute_buttons(mut commands: Commands, buttons: Query<Entity, Added<MuteB
             .entity(entity)
             .insert((
                 Button,
+                Hovered::default(),
                 Node {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
                     min_width: Val::Px(64.0),
@@ -288,17 +291,16 @@ fn build_mute_buttons(mut commands: Commands, buttons: Query<Entity, Added<MuteB
 }
 
 fn mute_clicks(
-    buttons: Query<&Interaction, (With<MuteButton>, Changed<Interaction>)>,
+    activate: On<Activate>,
+    buttons: Query<(), With<MuteButton>>,
     mut voices: Query<&mut Voice, Without<Remote>>,
 ) {
-    for interaction in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        let muted = voices.iter().any(|v| !v.muted);
-        for mut voice in &mut voices {
-            voice.muted = muted;
-        }
+    if !buttons.contains(activate.entity) {
+        return;
+    }
+    let muted = voices.iter().any(|v| !v.muted);
+    for mut voice in &mut voices {
+        voice.muted = muted;
     }
 }
 
@@ -336,6 +338,7 @@ fn build_camera_buttons(mut commands: Commands, buttons: Query<Entity, Added<Cam
             .entity(entity)
             .insert((
                 Button,
+                Hovered::default(),
                 Node {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
                     min_width: Val::Px(64.0),
@@ -355,20 +358,19 @@ fn build_camera_buttons(mut commands: Commands, buttons: Query<Entity, Added<Cam
 }
 
 fn camera_clicks(
-    buttons: Query<&Interaction, (With<CameraButton>, Changed<Interaction>)>,
+    activate: On<Activate>,
+    buttons: Query<(), With<CameraButton>>,
     mut settings: ResMut<MediaSettings>,
     mut before: Local<Option<CameraChoice>>,
 ) {
-    for interaction in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        if settings.camera == CameraChoice::None {
-            settings.camera = before.take().unwrap_or(CameraChoice::Default);
-        } else {
-            *before = Some(settings.camera.clone());
-            settings.camera = CameraChoice::None;
-        }
+    if !buttons.contains(activate.entity) {
+        return;
+    }
+    if settings.camera == CameraChoice::None {
+        settings.camera = before.take().unwrap_or(CameraChoice::Default);
+    } else {
+        *before = Some(settings.camera.clone());
+        settings.camera = CameraChoice::None;
     }
 }
 
@@ -408,6 +410,7 @@ fn build_screen_buttons(mut commands: Commands, buttons: Query<Entity, Added<Scr
             .entity(entity)
             .insert((
                 Button,
+                Hovered::default(),
                 Node {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
                     min_width: Val::Px(64.0),
@@ -428,14 +431,13 @@ fn build_screen_buttons(mut commands: Commands, buttons: Query<Entity, Added<Scr
 
 #[cfg(feature = "desktop")]
 fn screen_clicks(
-    buttons: Query<&Interaction, (With<ScreenButton>, Changed<Interaction>)>,
+    activate: On<Activate>,
+    buttons: Query<(), With<ScreenButton>>,
     mut settings: ResMut<MediaSettings>,
 ) {
-    for interaction in &buttons {
-        if *interaction == Interaction::Pressed {
-            let on = settings.share_screen;
-            settings.share_screen = !on;
-        }
+    if buttons.contains(activate.entity) {
+        let on = settings.share_screen;
+        settings.share_screen = !on;
     }
 }
 
@@ -655,6 +657,7 @@ fn row(
         action,
         RowSelected(selected),
         Button,
+        Hovered::default(),
         Node {
             flex_direction: FlexDirection::Column,
             padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
@@ -682,15 +685,13 @@ fn row(
 }
 
 fn picker_clicks(
-    rows: Query<(&Interaction, &RowAction), Changed<Interaction>>,
+    activate: On<Activate>,
+    rows: Query<&RowAction>,
     mut settings: ResMut<MediaSettings>,
     mut audio: ResMut<AudioDevices>,
     mut cameras: ResMut<CameraDevices>,
 ) {
-    for (interaction, action) in &rows {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    if let Ok(action) = rows.get(activate.entity) {
         match action {
             RowAction::Request(DeviceKind::Camera) => cameras.request(),
             RowAction::Request(_) => audio.request(),
@@ -718,16 +719,17 @@ fn picker_clicks(
 
 fn row_hover(
     mut rows: Query<
-        (&Interaction, &mut BackgroundColor, Option<&RowSelected>),
-        (With<Button>, Changed<Interaction>),
+        (&Hovered, &mut BackgroundColor, Option<&RowSelected>),
+        (With<Button>, Changed<Hovered>),
     >,
 ) {
-    for (interaction, mut colour, selected) in &mut rows {
-        let selected = selected.is_some_and(|s| s.0);
-        colour.0 = match interaction {
-            Interaction::Hovered | Interaction::Pressed => ROW_HOVER,
-            Interaction::None if selected => ROW_SELECTED,
-            Interaction::None => ROW,
+    for (hovered, mut colour, selected) in &mut rows {
+        colour.0 = if hovered.get() {
+            ROW_HOVER
+        } else if selected.is_some_and(|s| s.0) {
+            ROW_SELECTED
+        } else {
+            ROW
         };
     }
 }

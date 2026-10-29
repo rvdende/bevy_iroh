@@ -690,7 +690,7 @@ fn endpoint(iroh: &Iroh) -> Option<iroh::Endpoint> {
 }
 
 fn on_voice_removed(
-    remove: On<Remove, Voice>,
+    remove: On<Remove<Voice>>,
     iroh: Option<Res<Iroh>>,
     media: Res<Media>,
     q: Query<(&NetId, Has<Remote>, Option<&Subscribed>)>,
@@ -1122,7 +1122,7 @@ fn video_frames(
 }
 
 fn on_video_removed(
-    remove: On<Remove, VideoFeed>,
+    remove: On<Remove<VideoFeed>>,
     iroh: Option<Res<Iroh>>,
     media: Res<Media>,
     q: Query<(&NetId, Has<Remote>, Option<&VideoSubscribed>)>,

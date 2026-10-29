@@ -19,7 +19,7 @@ const MANIFEST_EVERY: f64 = 1.0;
 /// A local shared entity is going away, or is no longer shared. Runs before the components are
 /// gone, so the id and the rooms are still readable.
 pub(crate) fn on_remove_shared(
-    remove: On<Remove, Shared>,
+    remove: On<Remove<Shared>>,
     q: Query<(&NetId, &Replica), Without<Remote>>,
     mut outbox: ResMut<Outbox>,
 ) {
@@ -34,7 +34,7 @@ pub(crate) fn on_remove_shared(
 
 /// A replicated component left a local shared entity.
 pub(crate) fn on_remove_source<C: Codec>(
-    remove: On<Remove, C::Source>,
+    remove: On<Remove<C::Source>>,
     q: Query<(&NetId, &Replica), (With<Shared>, Without<Remote>)>,
     // Absent while the apply system holds the registry, which is exactly when a removal is a
     // peer's and not ours to announce.

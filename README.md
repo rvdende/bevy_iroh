@@ -76,7 +76,7 @@ codec's `verify` runs before its `decode`.
 ## Voice and video: the `media` feature
 
 ```toml
-bevy_iroh = "0.4"   # every feature but the browser ones, `wasm` and `web-demo`, is on by default
+bevy_iroh = "0.5"   # every feature but the browser ones, `wasm` and `web-demo`, is on by default
 ```
 
 That includes `demo`, which gives `cargo run` in a checkout a window of its own (Bevy's

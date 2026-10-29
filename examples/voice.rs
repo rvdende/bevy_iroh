@@ -87,7 +87,7 @@ fn setup(
 
 /// Runs for my avatar and for every avatar a peer sends me.
 fn on_add_avatar(
-    add: On<Add, Avatar>,
+    add: On<Add<Avatar>>,
     avatars: Query<&Avatar>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

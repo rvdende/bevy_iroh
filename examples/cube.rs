@@ -95,7 +95,7 @@ fn setup(
 
 /// Runs for my cube and for every cube a peer sends: one code path for visuals.
 fn on_add_cube(
-    add: On<Add, Cube>,
+    add: On<Add<Cube>>,
     cubes: Query<&Cube>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
