@@ -1,8 +1,8 @@
 [package]
 name = "bevy_iroh"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 description = "Share Bevy entities between peers over iroh: replication, rooms, presence and typed messages, with optional voice and video"
 repository = "https://github.com/rvdende/bevy_iroh"
@@ -118,7 +118,7 @@ web-demo = [
 demo = ["ui", "desktop", "webrtc", "v4l2", "bevy/default", "bevy/wayland", "bevy/x11"]
 
 [dependencies]
-bevy = { version = "0.20", default-features = false, features = ["bevy_log", "std"] }
+bevy = { version = "=0.20.0-dev", default-features = false, features = ["bevy_log", "std"] }
 iroh = "1.1"
 iroh-gossip = "0.101"
 postcard = { version = "1.1", features = ["alloc"] }
@@ -238,7 +238,7 @@ web-time = "1"
 [dev-dependencies]
 # No defaults: the examples get their Bevy through this crate's features (`demo` natively,
 # `web-demo` in a browser), so a browser build is not dragged up to Bevy's full default set.
-bevy = { version = "0.20", default-features = false, features = ["wayland", "x11"] }
+bevy = { version = "=0.20.0-dev", default-features = false, features = ["wayland", "x11"] }
 tempfile = "3"
 rand = "0.10"
 
@@ -306,3 +306,8 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# Bevy main (versioned 0.20.0-dev until 0.21), from cadrs's fork: https://github.com/rvdende/bevy,
+# branch `cadrs-main`. Used when this crate is built on its own; cadrs patches it the same way.
+[patch.crates-io]
+bevy = { git = "https://github.com/rvdende/bevy", branch = "cadrs-main" }
